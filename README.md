@@ -83,8 +83,31 @@ python3 sam_extract.py sam.hiv system.hiv
 |------|-------------|
 | `KeyTheft.c` | Handle theft + XOR/PNG output |
 | `KeyTheft.cs` | C# module: same chain as a single .NET 4 assembly, for `execute-assembly` or standalone use |
+| `bof/KeyTheftBof.c` | Beacon Object File: same chain, runs inside the C2 agent process |
+| `bof/beacon.h` | Minimal Beacon API declarations |
 | `decode.py` | PNG to `.hiv` decoder |
 | `sam_extract.py` | Standalone SAM hash extractor, matches `secretsdump.py` output |
+
+## BOF
+
+`bof/KeyTheftBof.c` compiles to a COFF object that runs inside the agent process. The whole chain is in-memory; only the hive dump (`NtSaveKey`) touches disk, and the plaintext `.tmp` is encrypted and removed in the same run.
+
+```bash
+# build (x64, no CRT, no linked imports)
+x86_64-w64-mingw32-gcc -c -O2 -fno-builtin -o KeyTheftBof.x64.o KeyTheftBof.c
+```
+
+Agent invocation (the agent packs the argument string):
+
+```
+go p=<1|0> k=<0|1> sam=<path.png> sys=<path.png>
+```
+
+- `p=1` (default) XOR+PNG packs each file and prints the key per file; `p=0` renames the raw hive instead
+- `k=1` keeps the plaintext `.tmp` on disk (testing only)
+- `sam=` / `sys=` paths, use either or both
+
+ Tested with [COFFLoader](https://github.com/trustedsec/COFFLoader) on Windows 11: handle theft, service re-enable/restore (signed `sc.exe` fallback), packing and boot key all verified; decoded output matches `secretsdump.py`.
 
 ## C# module
 
