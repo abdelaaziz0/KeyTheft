@@ -82,8 +82,25 @@ python3 sam_extract.py sam.hiv system.hiv
 | File | Description |
 |------|-------------|
 | `KeyTheft.c` | Handle theft + XOR/PNG output |
+| `KeyTheft.cs` | C# module: same chain as a single .NET 4 assembly, for `execute-assembly` or standalone use |
 | `decode.py` | PNG to `.hiv` decoder |
 | `sam_extract.py` | Standalone SAM hash extractor, matches `secretsdump.py` output |
+
+## C# module
+
+`KeyTheft.cs` is a C# port of the full chain for in-memory execution: no EXE lands on disk when loaded through a .NET capable agent. It also runs standalone.
+
+```bash
+csc /nologo /out:KeyTheftCS.exe KeyTheft.cs
+KeyTheftCS.exe [--sam <path>] [--system <path>] [--pack png|none] [--keep-temp] [--quiet]
+```
+
+Differences from the C version:
+
+- `--pack none` writes raw `.hiv` files, `--pack png` (default) applies the XOR/PNG disguise with one key per file.
+- Exit codes: 0 both hives, 2 partial, 1 failure, 3 bad args.
+- Keys and final status print to stdout even in `--quiet` mode.
+- The service restore uses `ControlService` first and falls back to the signed `sc.exe` when the host process is unsigned and the target runs Windows 11.
 
 ## Requirements
 
