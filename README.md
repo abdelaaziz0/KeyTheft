@@ -1,86 +1,42 @@
 # KeyTheft
 
-**SAM dump via RemoteRegistry handle theft, outputs XOR-encrypted PNG files with zero `regf` signature on disk.**
+**Fork of [ivancabrera02/KeyTheft](https://github.com/ivancabrera02/KeyTheft).**
 
-## What is this?
+KeyTheft dumps the Windows SAM database by stealing a registry KEY handle from the RemoteRegistry service's `svchost.exe` process and calling `NtSaveKey` on it. The attacking process never opens a SAM key itself. Output is XOR encrypted and disguised with a PNG header, so no `regf` magic bytes touch disk.
 
-KeyTheft dumps the Windows SAM database by stealing a registry KEY handle from the RemoteRegistry service's `svchost.exe` process. The attacking process **never opens any SAM registry key**. Output files are disguised as PNG images XOR-encrypted with a CSPRNG-generated key, prepended with a valid PNG header. No `regf` magic bytes ever touch disk.
+This fork fixes bugs that made the upstream release fail in practice: the C file did not compile, the PNG header failed CRC validation, and `sam_extract.py` produced wrong hashes on every Windows version. All fixes are verified on a live Windows 11 VM: `sam_extract.py` output is byte identical to `secretsdump.py`.
 
-This technique is distinct from every published SAM dump method:
+## Corrections
 
-| Technique | Primitive | Touches lsass? | Opens SAM key? | regf on disk? |
-|-----------|-----------|:--------------:|:--------------:|:-------------:|
-| `reg save HKLM\SAM` | NtOpenKey → NtSaveKey | No | **Yes** | **Yes** |
-| secretsdump (SAMR) | SamrConnect RPC | No | **Yes** (via RPC) | **Yes** |
-| Volume Shadow Copy | IVssBackupComponents | No | **Yes** (file read) | **Yes** |
-| Raw NTFS (`\\.\C:`) | MFT parse | No | No (but raw volume) | **Yes** |
-| Mimikatz (lsass dump) | MiniDumpWriteDump | **Yes** | No | N/A |
-| **KeyTheft** | **NtDuplicateObject → NtSaveKey** | **No** | **No** | **No** |
+### KeyTheft.c
 
-## How it works
+- Added the missing includes (`windows.h`, `stdio.h`, `stdlib.h`, `string.h`, `wchar.h`, `io.h`, `fcntl.h`). Upstream had none, so the file did not compile.
+- Fixed the hardcoded PNG IHDR CRC. The stored value failed `zlib.crc32` validation, so every output file was a corrupt PNG.
+- Check every `WriteFile` result before deleting the plaintext hive. Upstream could destroy the only copy of the data on a failed write.
+- Bound the handle table allocation retry loop in `GetKeyTypeIndex` and initialize its `NTSTATUS`.
+- Null terminate `_snwprintf` output buffers.
+- Re enable a disabled RemoteRegistry service. On stock Windows 11 the service is Disabled and `StartService` fails with error 1058.
+- Restore the service state after the run: stop it if we started it and restore the original start type.
+- Stop the service through the signed `sc.exe`. On Windows 11, `ControlService(STOP)` returns `ACCESS_DENIED` for unsigned callers even with an elevated token and a `SERVICE_ALL_ACCESS` handle, while `StartService` and `ChangeServiceConfig` are allowed.
+- Use the two call `NtQueryKey` pattern with a dynamically sized buffer instead of a fixed 2048 byte stack buffer.
+- Skip handles without read access before calling `NtDuplicateObject`.
+- Fall through to the next matching handle when `NtSaveKey` fails on one.
+- Set UTF-8 output mode so console captures stay readable.
+- Generate one random XOR key per output file instead of one shared key, and write each key to a `<output>.key` sidecar file.
 
-```
-                    ┌─────────────────────┐
-                    │   RemoteRegistry    │
-                    │   svchost.exe       │
-                    │   (SYSTEM, non-PPL) │
-                    │                     │
-                    │  Handle 0x238 ──────┼──► \REGISTRY\MACHINE\SAM
-                    └──────▲──────────────┘       (KEY object)
-                           │
-              NtDuplicateObject
-              (PROCESS_DUP_HANDLE)
-                           │
-                    ┌──────┴──────────────┐
-                    │   KeyTheft.exe      │
-                    │   (attacker, admin) │
-                    └──────┬──────────────┘
-                           │
-                      NtSaveKey
-                           │
-                    ┌──────▼──────────────┐
-                    │  .tmp (plaintext)   │──► XOR encrypt ──► sam.png
-                    │  (deleted on disk)  │                    (PNG header + ciphertext)
-                    └─────────────────────┘
+### decode.py
 
-```
+- Replace the per byte XOR loop with a keystream XOR over big integers. Same output, orders of magnitude faster on the SYSTEM hive.
 
-### Chain
+### sam_extract.py
 
-1. **Start RemoteRegistry** a non-PPL service running as SYSTEM inside `svchost.exe`
-2. **`RegConnectRegistryW("\\\\localhost", HKLM)`** loopback RPC connection
-3. **`RegOpenKeyExW(hRemote, "SAM", KEY_READ)`** forces the svchost process to call `NtOpenKey(\REGISTRY\MACHINE\SAM)` internally, creating a KEY handle in its handle table
-4. **Enumerate system handles** `NtQuerySystemInformation(SystemExtendedHandleInformation)`, filter for Key objects in the svchost PID
-5. **`NtDuplicateObject`** steal the SAM KEY handle from svchost into our process (svchost is not PPL, so `OpenProcess(PROCESS_DUP_HANDLE)` succeeds)
-6. **`NtSaveKey(stolen_handle, temp_file)`** dump the entire SAM hive subtree to a `.tmp` file
-7. **`DisguiseAsImage`** read the plaintext hive, XOR encrypt with a 16-byte CSPRNG key (`RtlGenRandom`), prepend a valid PNG header (8-byte signature + 25-byte IHDR), write as `.png`, delete the `.tmp`
-
-### Why NtSaveKey works with a stolen handle
-
-`NtSaveKey` operates in kernel mode. It checks:
-- The handle type is Key ✓
-- The caller has `SeBackupPrivilege` ✓ (we enable it)
-
-It then walks the **entire key subtree** in kernel mode, bypassing individual subkey DACLs. The subkeys under `SAM\SAM\Domains\Account` are SYSTEM-only, but `NtSaveKey` ignores this, it reads from the Configuration Manager's in-memory hive data, not through the access-check path.
-
-## PNG output format
-
-Output files pass `file`/YARA/EDR signature checks as PNG images:
-
-```
-Offset  Content
-──────  ─────────────────────────────────────
-0x00    89 50 4E 47 0D 0A 1A 0A          PNG signature (8 bytes)
-0x08    00 00 00 0D 49 48 44 52 ...      IHDR chunk — 1×1 RGBA (25 bytes)
-0x21    XX XX XX XX XX XX XX XX ...      XOR-encrypted hive data (N bytes)
-```
-
-**Properties:**
-- Valid PNG magic (`89 50 4E 47`) `file` command reports "PNG image data"
-- Valid IHDR chunk with correct CRC passes structural validation
-- No `regf` bytes anywhere in the file, YARA rules for registry hives won't match
-- XOR key generated by `RtlGenRandom` (CSPRNG) **not stored in the file**, only printed to console
-- Without the key, encrypted payload is indistinguishable from random data
+- Fix the SAM revision mapping. Upstream treated revision 2 as RC4 and 3 as AES. The real values are 1 = RC4 and 2 = AES, so upstream hit the wrong branch on every system: legacy systems raised "Unknown SAM revision: 1" and modern systems decrypted garbage.
+- Replace the incorrect `HMAC-MD5` per user key derivation with the correct plain `MD5(hashedBootKey[:16] + rid + "NTPASSWORD\0")` construction.
+- Fix the `SAM_HASH_AES` blob parsing. Upstream read the revision from the `PekID` field and the salt from offset 4. The salt is at offset 8 and the encrypted hash at offset 24.
+- Extract LM hashes. Upstream computed the offsets and never used them, printing the empty LM constant for every user.
+- Verify the hashed boot key checksum, which detects Syskey startup passwords.
+- Recurse `ri` index lists into `li` lists, upstream only handled `lf` and `lh` inside `ri` and silently missed subkeys.
+- Add bounds checks to the hive parser so corrupt files raise a clean error instead of `struct.error`.
 
 ## Build
 
@@ -88,7 +44,7 @@ Offset  Content
 # MSVC
 cl /W4 /O2 KeyTheft.c advapi32.lib
 
-# MinGW (MSYS2)
+# MinGW / llvm-mingw
 gcc -O2 -municode -o KeyTheft.exe KeyTheft.c -ladvapi32
 ```
 
@@ -98,78 +54,49 @@ gcc -O2 -municode -o KeyTheft.exe KeyTheft.c -ladvapi32
 KeyTheft.exe [sam_output.png] [system_output.png]
 ```
 
-<img width="1333" height="816" alt="SAMVALID" src="https://github.com/user-attachments/assets/4d0f9149-19b2-476c-9f20-cbebce58fb90" />
+Run from an elevated console. The tool starts RemoteRegistry if needed, dumps both hives, then returns the service to its original state.
 
 ### Decoding
 
-Use `decode.py` to strip the PNG header and XOR decrypt back to standard `.hiv` format:
+Each output file has its own XOR key in a sidecar file:
 
 ```bash
-python3 decode.py <xor_key_hex> sam.png system.png
-```
-
-```
-KeyTheft Decoder, restore PNG-disguised hive files
-
-[+] sam.png: valid registry hive (regf magic confirmed)
-    -> sam.hiv (49,152 bytes)
-[+] system.png: valid registry hive (regf magic confirmed)
-    -> system.hiv (16,732,160 bytes)
-
-  secretsdump.py -sam sam.hiv -system system.hiv LOCAL
+python3 decode.py $(cat sam.png.key) sam.png
+python3 decode.py $(cat system.png.key) system.png
 ```
 
 ### Hash extraction
-
-Extract NTLM hashes with impacket:
 
 ```bash
 secretsdump.py -sam sam.hiv -system system.hiv LOCAL
 ```
 
-Or use the included `sam_extract.py` (standalone, no dependencies):
+Or the standalone extractor (argument order: SAM first, SYSTEM second):
 
 ```bash
-python3 sam_extract.py system.hiv sam.hiv
+python3 sam_extract.py sam.hiv system.hiv
 ```
 
 ## Files
 
 | File | Description |
 |------|-------------|
-| `KeyTheft.c` | Main PoC, handle theft + XOR/PNG output |
-| `decode.py` | Decoder: PNG → `.hiv` (strips header, XOR decrypts, verifies `regf`) |
-| `sam_extract.py` | Standalone SAM hash extractor (pure Python, no impacket needed) |
-
-## Detection
-
-### What it generates
-
-| Observable | Source |
-|-----------|--------|
-| RemoteRegistry service started | Event Log: System 7036 |
-| `OpenProcess(svchost, 0x40)` | Sysmon Event 10 (TargetImage: svchost.exe) |
-| Handle duplication from svchost | ETW: `Microsoft-Windows-Kernel-Audit-API-Calls` |
-| `.png` file created (benign-looking) | Sysmon Event 11 (FileCreate) **blends with normal activity** |
-| NtSaveKey call | ETW: `Microsoft-Windows-Kernel-Registry` |
-
-### Why PNG disguise defeats file-based detection
-
-Most EDR and YARA rules for SAM dump artifacts rely on:
-1. **File extension** (`.hiv`, `.save`, `.dat`) output is `.png`
-2. **`regf` magic bytes** at offset 0, output starts with `89 50 4E 47` (PNG signature)
-3. **Registry hive structure patterns**, payload is XOR-encrypted, no recognizable structure
-
-The `.tmp` intermediate file (plaintext hive) exists only in memory-mapped I/O between `NtSaveKey` and `DisguiseAsImage`, and is deleted immediately after encryption. Race window is minimal.
+| `KeyTheft.c` | Handle theft + XOR/PNG output |
+| `decode.py` | PNG to `.hiv` decoder |
+| `sam_extract.py` | Standalone SAM hash extractor, matches `secretsdump.py` output |
 
 ## Requirements
 
-- Windows 10 / 11 (tested on Win11 26200)
-- Administrator privileges (for SeDebugPrivilege + SeBackupPrivilege)
-- RemoteRegistry service must be available (installed by default, usually set to Manual start)
+- Windows 10 / 11, tested on Windows 11
+- Administrator privileges (SeDebugPrivilege and SeBackupPrivilege)
+- RemoteRegistry service installed (default, the tool re enables it if disabled and restores the start type afterwards)
 
-## Limitations
+## Notes
 
-- If RemoteRegistry service is **disabled** (not just stopped), it cannot be started. Some hardened environments disable it via GPO.
-- `SeBackupPrivilege` is required regardless of handle source, this is checked by `NtSaveKey` in kernel mode.
-- The technique generates a service start event for RemoteRegistry, which is unusual in environments where this service is normally stopped.
+- On Windows 11 the RemoteRegistry service ships Disabled. The tool re enables it, dumps, and puts it back.
+- `ControlService(STOP)` is denied to unsigned callers on Windows 11. This is why the restore path spawns the signed `sc.exe` binary.
+- The XOR key for each file is written next to the output. It is not stored inside the PNG.
+
+## Credits
+
+Original technique and code by [ivancabrera02](https://github.com/ivancabrera02/KeyTheft). This fork only corrects bugs; see the Corrections section above. Hash extraction logic cross checked against [impacket](https://github.com/fortra/impacket).

