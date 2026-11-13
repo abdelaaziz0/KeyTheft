@@ -724,6 +724,10 @@ public static class KeyTheft
                 samKey = PackPng(samTmp, samOut, !keepTemp);
                 Art("packed " + samOut + " key in operator output");
             }
+            else if (keepTemp)
+            {
+                File.Copy(samTmp, samOut, true);
+            }
             else
             {
                 File.Copy(samTmp, samOut, true);
@@ -736,6 +740,10 @@ public static class KeyTheft
             {
                 sysKey = PackPng(sysTmp, sysOut, !keepTemp);
                 Art("packed " + sysOut + " key in operator output");
+            }
+            else if (keepTemp)
+            {
+                File.Copy(sysTmp, sysOut, true);
             }
             else
             {
@@ -750,6 +758,10 @@ public static class KeyTheft
             {
                 secKey = PackPng(secTmp, secOut, !keepTemp);
                 Art("packed " + secOut + " key in operator output");
+            }
+            else if (keepTemp)
+            {
+                File.Copy(secTmp, secOut, true);
             }
             else
             {

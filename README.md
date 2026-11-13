@@ -88,17 +88,8 @@ With the SECURITY hive the extractor also dumps LSA secrets (service account pas
 | `bof/KeyTheftBof.c` | Beacon Object File: same chain, runs inside the C2 agent process |
 | `bof/beacon.h` | Minimal Beacon API declarations |
 | `keytheft.cna` | Aggressor script: `keytheft` command wrapping the BOF |
-| `kt.sh` | One-command pipeline: dump over ssh, pull, decode, extract secrets |
 | `decode.py` | PNG to `.hiv` decoder |
 | `sam_extract.py` | Standalone SAM hash extractor, matches `secretsdump.py` output |
-
-## Pipeline
-
-```bash
-./kt.sh user@host [--sec] [--out DIR] [--skip-dump] [--pack none]
-```
-
-Runs the whole chain against a reachable target: pushes the exe, dumps the hives, pulls the artifacts, extracts secrets. Default mode pulls PNGs and decodes with the sidecar keys; `--pack none` pulls raw `.hiv` files and skips decoding. Environment: `KT_SSH_KEY` (default `~/.ssh/comrace_winvm`), `KT_EXE`, `KT_PY`. The target ssh user must be elevated for the dump step. Set `pycryptodomex` in the local interpreter (`KT_PY`).
 
 ## Cobalt Strike
 

