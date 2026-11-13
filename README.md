@@ -87,8 +87,28 @@ With the SECURITY hive the extractor also dumps LSA secrets (service account pas
 | `KeyTheft.cs` | C# module: same chain as a single .NET 4 assembly, for `execute-assembly` or standalone use |
 | `bof/KeyTheftBof.c` | Beacon Object File: same chain, runs inside the C2 agent process |
 | `bof/beacon.h` | Minimal Beacon API declarations |
+| `keytheft.cna` | Aggressor script: `keytheft` command wrapping the BOF |
+| `kt.sh` | One-command pipeline: dump over ssh, pull, decode, extract secrets |
 | `decode.py` | PNG to `.hiv` decoder |
 | `sam_extract.py` | Standalone SAM hash extractor, matches `secretsdump.py` output |
+
+## Pipeline
+
+```bash
+./kt.sh user@host [--sec] [--out DIR] [--skip-dump] [--pack none]
+```
+
+Runs the whole chain against a reachable target: pushes the exe, dumps the hives, pulls the PNGs, decodes with the sidecar keys, extracts secrets. Environment: `KT_SSH_KEY` (default `~/.ssh/comrace_winvm`), `KT_EXE`, `KT_PY`. The target ssh user must be elevated for the dump step. Set `pycryptodomex` in the local interpreter (`KT_PY`).
+
+## Cobalt Strike
+
+Load `keytheft.cna` (Script Manager), then from a beacon:
+
+```
+keytheft p=1 k=0 sam=C:\Temp\sam.png sys=C:\Temp\system.png sec=C:\Temp\security.png
+```
+
+The script packs the argument string and runs the BOF via `beacon_inline_execute`. Keys print in beacon output; pull the PNGs and decode with `decode.py`.
 
 ## BOF
 

