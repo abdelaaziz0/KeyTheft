@@ -3,3 +3,6 @@ kt-out/
 __pycache__/
 KeyTheft.exe
 *.o
+kt-out/
+kt-png/
+kt-raw/

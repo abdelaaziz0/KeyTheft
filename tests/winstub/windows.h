@@ -113,3 +113,5 @@ typedef struct _SSTAT { DWORD dwCurrentState; } SERVICE_STATUS;
 typedef struct _SIW { DWORD cb; } STARTUPINFOW;
 typedef struct _PIW { HANDLE hProcess, hThread; DWORD pid, tid; } PROCESS_INFORMATION;
 #define CreateProcessW(a,b,c,d,e,f,g,h,i,j) ((BOOL)0)
+#define QueryFullProcessImageNameW(a,b,c,d) ((BOOL)0)
+#define MoveFileW(a,b) ((BOOL)0)

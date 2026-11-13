@@ -2,7 +2,7 @@
 
 **Fork of [ivancabrera02/KeyTheft](https://github.com/ivancabrera02/KeyTheft).**
 
-KeyTheft dumps the Windows SAM database by stealing a registry KEY handle from the RemoteRegistry service's `svchost.exe` process and calling `NtSaveKey` on it. The attacking process never opens a SAM key itself. Output is XOR encrypted and disguised with a PNG header, so no `regf` magic bytes touch disk.
+KeyTheft dumps the Windows SAM database by stealing a registry KEY handle from a process that holds one and calling `NtSaveKey` on it. The attacking process never opens a SAM key itself. The final artifact is XOR encrypted and disguised with a PNG header, so the delivered file carries no `regf` signature. `NtSaveKey` writes a plaintext `.tmp` first, which the tool deletes after encryption; deletion does not erase the underlying disk sectors, so the plaintext hive can be recoverable from disk forensics.
 
 This fork fixes bugs that made the upstream release fail in practice: the C file did not compile, the PNG header failed CRC validation, and `sam_extract.py` produced wrong hashes on every Windows version. All fixes are verified on a live Windows 11 VM: `sam_extract.py` output is byte identical to `secretsdump.py`.
 
@@ -51,10 +51,10 @@ gcc -O2 -municode -o KeyTheft.exe KeyTheft.c -ladvapi32
 ## Usage
 
 ```
-KeyTheft.exe [sam_output.png] [system_output.png] [security_output.png]
+KeyTheft.exe [--raw] [sam_output] [system_output] [security_output]
 ```
 
-Run from an elevated console. The tool starts RemoteRegistry if needed, dumps the requested hives, then returns the service to its original state. The third argument enables the SECURITY hive (LSA secrets). Use `-` in a position to skip that hive.
+Run from an elevated console. The tool starts RemoteRegistry if needed, dumps the requested hives, then returns the service to its original state. `-` in a position skips that hive (three positions: SAM, SYSTEM, SECURITY; the third enables the SECURITY hive). Without `--raw` each hive is XOR+PNG packed and a `<output>.key` file is written before the plaintext is deleted; `--raw` leaves standard `.hiv` files instead and writes no keys.
 
 ### Decoding
 
@@ -98,7 +98,7 @@ With the SECURITY hive the extractor also dumps LSA secrets (service account pas
 ./kt.sh user@host [--sec] [--out DIR] [--skip-dump] [--pack none]
 ```
 
-Runs the whole chain against a reachable target: pushes the exe, dumps the hives, pulls the PNGs, decodes with the sidecar keys, extracts secrets. Environment: `KT_SSH_KEY` (default `~/.ssh/comrace_winvm`), `KT_EXE`, `KT_PY`. The target ssh user must be elevated for the dump step. Set `pycryptodomex` in the local interpreter (`KT_PY`).
+Runs the whole chain against a reachable target: pushes the exe, dumps the hives, pulls the artifacts, extracts secrets. Default mode pulls PNGs and decodes with the sidecar keys; `--pack none` pulls raw `.hiv` files and skips decoding. Environment: `KT_SSH_KEY` (default `~/.ssh/comrace_winvm`), `KT_EXE`, `KT_PY`. The target ssh user must be elevated for the dump step. Set `pycryptodomex` in the local interpreter (`KT_PY`).
 
 ## Cobalt Strike
 
@@ -112,7 +112,7 @@ The script packs the argument string and runs the BOF via `beacon_inline_execute
 
 ## BOF
 
-`bof/KeyTheftBof.c` compiles to a COFF object that runs inside the agent process. The whole chain is in-memory; only the hive dump (`NtSaveKey`) touches disk, and the plaintext `.tmp` is encrypted and removed in the same run.
+`bof/KeyTheftBof.c` compiles to a COFF object that runs inside the agent process. The handle scan, theft and packing happen in memory; `NtSaveKey` still writes a plaintext `.tmp` that is encrypted and deleted in the same run (see the disk-forensics note above).
 
 ```bash
 # build (x64, no CRT, no linked imports)
@@ -125,7 +125,7 @@ Agent invocation (the agent packs the argument string):
 go p=<1|0> k=<0|1> sam=<path.png> sys=<path.png> sec=<path.png>
 ```
 
-- `p=1` (default) XOR+PNG packs each file and prints the key per file; `p=0` renames the raw hive instead
+- `p=1` (default) XOR+PNG packs each file and prints the key per file; `p=0` writes the raw hive instead (copies it if `k=1`, renames otherwise)
 - `k=1` keeps the plaintext `.tmp` on disk (testing only)
 - `sam=` / `sys=` / `sec=` paths, use any combination; `sec=` targets the SECURITY hive through a `REG_OPTION_BACKUP_RESTORE` open
 

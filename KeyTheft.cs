@@ -561,7 +561,7 @@ public static class KeyTheft
         return b;
     }
 
-    static string PackPng(string src, string dst)
+    static string PackPng(string src, string dst, bool deleteSrc)
     {
         byte[] data = File.ReadAllBytes(src);
         byte[] key = new byte[16];
@@ -576,7 +576,8 @@ public static class KeyTheft
             fs.Write(ihdr, 0, ihdr.Length);
             fs.Write(data, 0, data.Length);
         }
-        File.Delete(src);
+        if (deleteSrc)
+            File.Delete(src);
         return ToHex(key);
     }
 
@@ -720,8 +721,12 @@ public static class KeyTheft
         {
             if (pack)
             {
-                samKey = PackPng(samTmp, samOut);
+                samKey = PackPng(samTmp, samOut, !keepTemp);
                 Art("packed " + samOut + " key in operator output");
+            }
+            else if (keepTemp)
+            {
+                File.Copy(samTmp, samOut, true);
             }
             else
             {
@@ -732,8 +737,12 @@ public static class KeyTheft
         {
             if (pack)
             {
-                sysKey = PackPng(sysTmp, sysOut);
+                sysKey = PackPng(sysTmp, sysOut, !keepTemp);
                 Art("packed " + sysOut + " key in operator output");
+            }
+            else if (keepTemp)
+            {
+                File.Copy(sysTmp, sysOut, true);
             }
             else
             {
@@ -745,8 +754,12 @@ public static class KeyTheft
         {
             if (pack)
             {
-                secKey = PackPng(secTmp, secOut);
+                secKey = PackPng(secTmp, secOut, !keepTemp);
                 Art("packed " + secOut + " key in operator output");
+            }
+            else if (keepTemp)
+            {
+                File.Copy(secTmp, secOut, true);
             }
             else
             {
